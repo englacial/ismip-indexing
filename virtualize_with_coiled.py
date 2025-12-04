@@ -33,28 +33,40 @@ print("Step 1/3 Complete: Built file index!")
     keepalive="1 hour",
     spot_policy="on-demand",
 )
-def virtualize_file(row) -> Tuple(str, xr.Dataset):
-    p = f'{row["institution"]}_{row["model_name"]}/{row["experiment"]}/{row["variable"]}' # DataTree path
-    
-    vds = open_virtual_dataset(
-        url=row["url"],
-        parser=parser,
-        registry=registry,
-        loadable_variables=['time', 'x', 'y'],
-        decode_times=False
-    )
-    vds_fix_time = ismip6_helper.fix_time_encoding(vds)
-    vds_fix_coords = ismip6_helper.correct_grid_coordinates(vds_fix_time, row["variable"])
-    # key, dataset tuble
-    return (p, vds_fix_coords)
+def virtualize_file(row):
+    try:
+        p = f'{row["institution"]}_{row["model_name"]}/{row["experiment"]}/{row["variable"]}' # DataTree path
+
+        vds = open_virtual_dataset(
+            url=row["url"],
+            parser=parser,
+            registry=registry,
+            loadable_variables=['time', 'x', 'y'],
+            decode_times=False
+        )
+        vds_fix_time = ismip6_helper.fix_time_encoding(vds)
+        vds_fix_coords = ismip6_helper.correct_grid_coordinates(vds_fix_time, row["variable"])
+        return {"success": True, "data": (p, vds_fix_coords), "url": row["url"]}
+    except Exception as e:
+        return {"success": False, "error": str(e), "url": row["url"]}
 
 # Map over all files in parallel
-all_vdss = virtualize_file.map(files)
+all_results = virtualize_file.map(files)
 
-for vds in all_vdss:
-    print(f"finished {vds[0]}")
+# Filter and log
+successful_vdss = []
+failed_urls = []
 
-print("Step 2/3 Complete: Done virtualizing files!")
+for result in all_results:
+    if result["success"]:
+        successful_vdss.append(result["data"])
+        print(f"✓ Successfully virtualized: {result['data'][0]}")
+    else:
+        failed_urls.append(result["url"])
+        print(f"✗ Failed to virtualize {result['url']}: {result['error']}")
+
+print(f"\nStep 2/3 Complete: Virtualized {len(successful_vdss)}/{len(files)} files")
+print(f"Failed: {len(failed_urls)} files")
 
 # Now combine
 @coiled.function(
@@ -97,5 +109,5 @@ def combine_and_write(refs_list):
     return print(session.commit("Createed virtual store"))
 
 print("Starting combine and write")
-combine_and_write(list(all_vdss))
+combine_and_write(successful_vdss)
 print("Step 3/3 Complete: Combined virtual datasets to data tree and wrote icechunk store!")
