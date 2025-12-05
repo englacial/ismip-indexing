@@ -7,7 +7,7 @@ name = "ismip6-helper"
 version = "0.1.0"
 description = "Helper utilities for loading ISMIP6 outputs"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.12"
 authors = [
     { name = "Thomas Teisberg" },
 ]
