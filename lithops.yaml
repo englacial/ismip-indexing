@@ -1,0 +1,16 @@
+lithops:
+    backend: gcp_functions
+    storage: gcp_storage
+
+gcp:
+    region: us-west1
+    credentials_path: /Users/aimeebarciauskas/lithops-sa-key.json
+
+gcp_functions:
+    region: us-west1
+    runtime: ismip6-icechunk
+    runtime_memory: 8192
+    project_id: ds-englacial
+
+gcp_storage:
+    storage_bucket: ismip6-icechunk  # Lithops uses storage_bucket, not bucket
