@@ -102,4 +102,3 @@ Each failure record includes:
 ## Improvements
 
 * Virtualization is still a bit slow for the entire archive (~6 hours) grouping by model and experiment. Could this be sped up, perhaps virtualizing all files first and / or grouping only by model?
-* Reconciliation: If writing fails for some subset of files, what would be a good reconciliation process? That is, compare what is in the zarr store with the `gs://ismip6` index parquet file.

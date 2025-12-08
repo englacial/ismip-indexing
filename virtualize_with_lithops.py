@@ -44,15 +44,7 @@ def virtualize_file(row: dict):
         "url": row["url"]
     }
 
-def write_batch_to_icechunk(batch_results: list):
-    """Write a batch of virtual datasets to Icechunk in a single commit.
-
-    Args:
-        batch_results: List of dicts with 'path', 'dataset', and 'url' keys
-
-    Returns:
-        dict with commit_id and list of written paths
-    """
+def open_or_create_repo() -> icechunk.Repository:
     # Setup Icechunk config
     config = icechunk.RepositoryConfig.default()
     config.set_virtual_chunk_container(
@@ -69,7 +61,18 @@ def write_batch_to_icechunk(batch_results: list):
 
     icechunk_storage = icechunk.gcs_storage(bucket="ismip6-icechunk", prefix="12-07-2025", from_env=True)
 
-    repo = icechunk.Repository.open_or_create(icechunk_storage, config=config, authorize_virtual_chunk_access=credentials)
+    return icechunk.Repository.open_or_create(icechunk_storage, config=config, authorize_virtual_chunk_access=credentials)    
+
+def write_batch_to_icechunk(batch_results: list):
+    """Write a batch of virtual datasets to Icechunk in a single commit.
+
+    Args:
+        batch_results: List of dicts with 'path', 'dataset', and 'url' keys
+
+    Returns:
+        dict with commit_id and list of written paths
+    """
+    repo = open_or_create_repo()
     session = repo.writable_session("main")
 
     # Write all datasets in the batch
@@ -93,12 +96,11 @@ def safe_virtualize_file(row):
     try:
         return virtualize_file(row)
     except Exception as e:
-        raise
-        # return {
-        #     "success": False,
-        #     "error": str(e),
-        #     "url": row["url"]
-        # }
+        return {
+            "success": False,
+            "error": str(e),
+            "url": row["url"]
+        }
 
 
 def process_all_files():
@@ -122,8 +124,16 @@ def process_all_files():
 
     # Step 2: Group by model and experiment
     print("\nStep 2/3: Grouping files by model and experiment...")
-    grouped = files_df.groupby(['model_name', 'experiment'])
-    batches = [(name, group.to_dict('records')) for name, group in grouped]
+    grouped = files_df.groupby(['institution', 'model_name', 'experiment'])
+    # skip groups already in the zarr store
+    repo = open_or_create_repo()
+    session = repo.readonly_session(branch="main")
+    root = zarr.open(session.store, mode='r')
+    batches = [
+        (name, group.to_dict('records')) 
+        for name, group in grouped 
+        if f"{name[0]}_{name[1]}/{name[2]}" not in root
+    ]
     print(f"Step 2/3 Complete: Created {len(batches)} batches")
 
     # Initialize Lithops executor
@@ -135,7 +145,7 @@ def process_all_files():
     total_failed = 0
     all_failed_results = []
 
-    for batch_idx, ((model_name, experiment), batch_files) in enumerate(batches, 1):
+    for batch_idx, ((_, model_name, experiment), batch_files) in enumerate(batches, 1):
         print(f"\n{'='*80}")
         print(f"Batch {batch_idx}/{len(batches)}: {model_name} / {experiment}")
         print(f"Files in batch: {len(batch_files)}")
