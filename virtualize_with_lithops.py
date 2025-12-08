@@ -14,7 +14,11 @@ from virtualizarr.writers.icechunk import virtual_dataset_to_icechunk
 import zarr
 
 def virtualize_file(row: dict):
-    """Virtualize a single file. Executed as a serverless function."""
+    """Virtualize a single file. Executed as a serverless function.
+
+    Returns:
+        dict with 'path', 'dataset', and 'url' keys
+    """
     parser = HDFParser()
     bucket = "gs://ismip6"
     store = obstore.store.from_url(bucket, skip_signature=True)
@@ -26,15 +30,29 @@ def virtualize_file(row: dict):
         url=row["url"],
         parser=parser,
         registry=registry,
-        loadable_variables=['time', 'x', 'y'],
+        loadable_variables=['time', 'x', 'y', 'lat', 'lon', 'latitude', 'longitude'],
         decode_times=False
     )
     vds_fix_time = ismip6_helper.fix_time_encoding(vds)
+    print(row)
     vds_fix_coords = ismip6_helper.correct_grid_coordinates(vds_fix_time, row["variable"])
-    return path, vds_fix_coords
 
-def write_dataset(path: str, dataset: xr.Dataset):
-    """Write a virtual datasets to Icechunk. Executed as a serverless function."""
+    return {
+        "success": True,
+        "path": path,
+        "dataset": vds_fix_coords,
+        "url": row["url"]
+    }
+
+def write_batch_to_icechunk(batch_results: list):
+    """Write a batch of virtual datasets to Icechunk in a single commit.
+
+    Args:
+        batch_results: List of dicts with 'path', 'dataset', and 'url' keys
+
+    Returns:
+        dict with commit_id and list of written paths
+    """
     # Setup Icechunk config
     config = icechunk.RepositoryConfig.default()
     config.set_virtual_chunk_container(
@@ -49,36 +67,50 @@ def write_dataset(path: str, dataset: xr.Dataset):
         "gs://ismip6/": None
     })
 
-    icechunk_storage = icechunk.gcs_storage(bucket="ismip6-icechunk", prefix="12-07-2025-test2", from_env=True)
+    icechunk_storage = icechunk.gcs_storage(bucket="ismip6-icechunk", prefix="12-07-2025", from_env=True)
 
     repo = icechunk.Repository.open_or_create(icechunk_storage, config=config, authorize_virtual_chunk_access=credentials)
     session = repo.writable_session("main")
 
-    virtual_dataset_to_icechunk(dataset, session.store, group=path)
-    commit_msg = f"Added new node at {path}"
-    commit_id = session.commit(commit_msg)
-    return commit_id, commit_msg
+    # Write all datasets in the batch
+    written_paths = []
+    for result in batch_results:
+        virtual_dataset_to_icechunk(result["dataset"], session.store, group=result["path"])
+        written_paths.append(result["path"])
 
-def process_and_write(row):
+    # Single commit for the entire batch
+    commit_msg = f"Added {len(written_paths)} datasets: {', '.join(written_paths)}"
+    commit_id = session.commit(commit_msg)
+
+    return {
+        "commit_id": commit_id,
+        "paths": written_paths,
+        "count": len(written_paths)
+    }
+
+def safe_virtualize_file(row):
+    """Wrapper around virtualize_file with error handling."""
     try:
-        path, vds = virtualize_file(row)
-        commit_id, commit_msg = write_dataset(path, vds)
-        return {
-            "success": True,
-            "url": row["url"],
-            "commit_id": commit_id,
-            "message": commit_msg
-        }
+        return virtualize_file(row)
     except Exception as e:
-        return {
-            "success": False,
-            "error": str(e),
-            "url": row["url"]
-        }
+        raise
+        # return {
+        #     "success": False,
+        #     "error": str(e),
+        #     "url": row["url"]
+        # }
 
 
 def process_all_files():
-    """Process all files using Lithops serverless executor."""
+    """Process all files using Lithops serverless executor.
+
+    Strategy:
+    1. Build file index and group by model and experiment
+    2. For each group (batch):
+       - Parallelize virtualization using Lithops
+       - Write all successful virtualizations to Icechunk in one commit
+    3. Process batches sequentially to avoid Icechunk conflicts
+    """
     import warnings
     # Silence the specific Zarr warning
     warnings.filterwarnings('ignore', module='zarr')
@@ -86,55 +118,103 @@ def process_all_files():
     # Step 1: Build file index
     print("Step 1/3: Building file index...")
     files_df = ismip6_helper.build_file_index()
-    files = [{'row': f } for f in files_df.iloc[5:6].to_dict('records')]
-    print(f"Step 1/2 Complete: Built file index with {len(files)} files!")
+    print(f"Step 1/3 Complete: Built file index with {len(files_df)} files!")
 
-    # Step 2: Process files in parallel using Lithops
-    print(f"\nStep 2/2: Virtualizing files using Lithops serverless functions...")
+    # Step 2: Group by model and experiment
+    print("\nStep 2/3: Grouping files by model and experiment...")
+    grouped = files_df.groupby(['model_name', 'experiment'])
+    batches = [(name, group.to_dict('records')) for name, group in grouped]
+    print(f"Step 2/3 Complete: Created {len(batches)} batches")
 
-    # Initialize Lithops executor with config file
+    # Initialize Lithops executor
     fexec = lithops.FunctionExecutor(config_file='lithops.yaml')
 
-    # Map the virtualize_file function across all files
-    futures = fexec.map(process_and_write, files)
+    # Step 3: Process each batch sequentially
+    print("\nStep 3/3: Processing batches...")
+    total_successful = 0
+    total_failed = 0
+    all_failed_results = []
 
-    # Wait for all results
-    all_results = fexec.get_result(futures)
-    fexec.clean()
+    for batch_idx, ((model_name, experiment), batch_files) in enumerate(batches, 1):
+        print(f"\n{'='*80}")
+        print(f"Batch {batch_idx}/{len(batches)}: {model_name} / {experiment}")
+        print(f"Files in batch: {len(batch_files)}")
+        print(f"{'='*80}")
 
-    # Filter and log results
-    successful_vdss = []
-    failed_results = []
+        # Parallelize virtualization for this batch
+        print(f"  Virtualizing {len(batch_files)} files in parallel...")
+        batch_files_as_row = [{'row': file} for file in batch_files]
+        futures = fexec.map(safe_virtualize_file, batch_files_as_row)
+        virtualization_results = fexec.get_result(futures)
 
-    for result in all_results:
-        if result["success"]:
-            successful_vdss.append(result["message"])
-            print(f"✓ Successfully virtualized: {result["url"]}")
-        else:
-            failed_results.append({
+        # Separate successful and failed virtualizations
+        successful_vds = [r for r in virtualization_results if r.get("success")]
+        failed_vds = [r for r in virtualization_results if not r.get("success")]
+
+        print(f"  ✓ Virtualized: {len(successful_vds)}/{len(batch_files)}")
+        if failed_vds:
+            print(f"  ✗ Failed virtualization: {len(failed_vds)}")
+
+        # Write successful virtualizations to Icechunk
+        if successful_vds:
+            try:
+                print(f"  Writing {len(successful_vds)} datasets to Icechunk...")
+                write_result = write_batch_to_icechunk(successful_vds)
+                print(f"  ✓ Committed {write_result['count']} datasets")
+                print(f"  Commit ID: {write_result['commit_id']}")
+                total_successful += len(successful_vds)
+            except Exception as e:
+                print(f"  ✗ Failed to write batch to Icechunk: {e}")
+                # Treat all successful virtualizations as failed if write fails
+                for result in successful_vds:
+                    failed_vds.append({
+                        "success": False,
+                        "url": result["url"],
+                        "error": f"Icechunk write failed: {str(e)}",
+                        "timestamp": datetime.now(timezone.utc).isoformat()
+                    })
+
+        # Track failures
+        for result in failed_vds:
+            all_failed_results.append({
                 **result,
+                "model_name": model_name,
+                "experiment": experiment,
                 "timestamp": datetime.now(timezone.utc).isoformat()
             })
-            print(f"✗ Failed to virtualize {result['url']}: {result['error']}")
+        total_failed += len(failed_vds)
 
-    print(f"\nStep 2/2 Complete: Virtualized {len(successful_vdss)}/{len(files)} files")
-    print(f"Failed: {len(failed_results)} files")
+    # Clean up Lithops executor
+    fexec.clean()
+
+    print(f"\n{'='*80}")
+    print(f"Step 3/3 Complete!")
+    print(f"Total successful: {total_successful}")
+    print(f"Total failed: {total_failed}")
+    print(f"{'='*80}")
 
     # Log failures to bucket
-    if failed_results:
+    if all_failed_results:
         print("\nLogging failures to bucket...")
         failure_log_bucket = "gs://ismip6-icechunk"
         failure_log_path = f"failures/virtualization_failures_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.json"
 
         try:
             failure_store = obstore.store.from_url(failure_log_bucket, from_env=True)
-            failure_data = json.dumps(failed_results, indent=2).encode('utf-8')
+            failure_data = json.dumps(all_failed_results, indent=2).encode('utf-8')
             failure_store.put(failure_log_path, failure_data)
-            print(f"✓ Logged {len(failed_results)} failures to {failure_log_bucket}/{failure_log_path}")
+            print(f"✓ Logged {len(all_failed_results)} failures to {failure_log_bucket}/{failure_log_path}")
         except Exception as e:
             print(f"✗ Failed to log failures to bucket: {e}")
             print("Failed results:")
-            print(json.dumps(failed_results, indent=2))
+            print(json.dumps(all_failed_results, indent=2))
+
+    return {
+        "total_files": len(files_df),
+        "total_batches": len(batches),
+        "successful": total_successful,
+        "failed": total_failed
+    }
 
 if __name__ == "__main__":
     result = process_all_files()

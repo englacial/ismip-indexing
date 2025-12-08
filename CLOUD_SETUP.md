@@ -30,7 +30,7 @@ gcloud iam service-accounts create lithops-executor \
 
 ### 3. Grant Required Permissions
 
-See [Lithops GCP Functions Documentation](https://lithops-cloud.github.io/docs/source/compute_config/gcp_functions.html) for a list of required permissions - those below need to be updated.
+See [Lithops GCP Functions Documentation](https://lithops-cloud.github.io/docs/source/compute_config/gcp_functions.html) for a list of required permissions - THOSE BELOW NEED TO BE UPDATED.
 
 Grant Cloud Functions Developer role (to deploy and manage serverless functions):
 
@@ -101,6 +101,7 @@ gcp_storage:
 - **Roles**:
   - `roles/cloudfunctions.developer`
   - `roles/storage.objectAdmin`
+  - OTHERS/ADD ME
 - **Key Location**: `~/lithops-sa-key.json`
 
 ## Build the runtime
@@ -111,23 +112,3 @@ lithops runtime build -f requirements.txt ismip6-icechunk -c lithops.yaml
 lithops runtime deploy ismip6-icechunk -c lithops.yaml
 ```
 
-## Troubleshooting
-
-### Authentication Errors
-
-If you see errors like:
-```
-Service account info was not in the expected format, missing fields client_email, token_uri
-```
-
-This means you're trying to use Application Default Credentials instead of a service account key. Make sure `credentials_path` in `lithops.yaml` points to the service account JSON key file.
-
-### Permission Errors
-
-If Cloud Functions fail to deploy or access storage, verify the service account has the correct roles:
-
-```bash
-gcloud projects get-iam-policy $PROJECT_ID \
-    --flatten="bindings[].members" \
-    --filter="bindings.members:serviceAccount:lithops-executor@${PROJECT_ID}.iam.gserviceaccount.com"
-```
