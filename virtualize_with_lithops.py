@@ -102,6 +102,28 @@ def safe_virtualize_file(row):
             "url": row["url"]
         }
 
+def write_failures_to_bucket(failed_results: list):
+    """Write failed results to the bucket immediately.
+
+    Args:
+        failed_results: List of dicts with failure information
+    """
+    if not failed_results:
+        return
+
+    failure_log_bucket = "gs://ismip6-icechunk"
+    failure_log_path = f"failures/virtualization_failures_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.json"
+
+    try:
+        failure_store = obstore.store.from_url(failure_log_bucket)
+        failure_data = json.dumps(failed_results, indent=2).encode('utf-8')
+        failure_store.put(failure_log_path, failure_data)
+        print(f"  ✓ Logged {len(failed_results)} failures to {failure_log_bucket}/{failure_log_path}")
+    except Exception as e:
+        print(f"  ✗ Failed to log failures to bucket: {e}")
+        print("  Failed results:")
+        print(json.dumps(failed_results, indent=2))
+
 
 def process_all_files():
     """Process all files using Lithops serverless executor.
@@ -143,7 +165,6 @@ def process_all_files():
     print("\nStep 3/3: Processing batches...")
     total_successful = 0
     total_failed = 0
-    all_failed_results = []
 
     for batch_idx, ((_, model_name, experiment), batch_files) in enumerate(batches, 1):
         print(f"\n{'='*80}")
@@ -184,15 +205,19 @@ def process_all_files():
                         "timestamp": datetime.now(timezone.utc).isoformat()
                     })
 
-        # Track failures
-        for result in failed_vds:
-            all_failed_results.append({
-                **result,
-                "model_name": model_name,
-                "experiment": experiment,
-                "timestamp": datetime.now(timezone.utc).isoformat()
-            })
-        total_failed += len(failed_vds)
+        # Write failures immediately if any occurred
+        if failed_vds:
+            batch_failures = [
+                {
+                    **result,
+                    "model_name": model_name,
+                    "experiment": experiment,
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }
+                for result in failed_vds
+            ]
+            write_failures_to_bucket(batch_failures)
+            total_failed += len(failed_vds)
 
     # Clean up Lithops executor
     fexec.clean()
@@ -202,22 +227,6 @@ def process_all_files():
     print(f"Total successful: {total_successful}")
     print(f"Total failed: {total_failed}")
     print(f"{'='*80}")
-
-    # Log failures to bucket
-    if all_failed_results:
-        print("\nLogging failures to bucket...")
-        failure_log_bucket = "gs://ismip6-icechunk"
-        failure_log_path = f"failures/virtualization_failures_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.json"
-
-        try:
-            failure_store = obstore.store.from_url(failure_log_bucket, from_env=True)
-            failure_data = json.dumps(all_failed_results, indent=2).encode('utf-8')
-            failure_store.put(failure_log_path, failure_data)
-            print(f"✓ Logged {len(all_failed_results)} failures to {failure_log_bucket}/{failure_log_path}")
-        except Exception as e:
-            print(f"✗ Failed to log failures to bucket: {e}")
-            print("Failed results:")
-            print(json.dumps(all_failed_results, indent=2))
 
     return {
         "total_files": len(files_df),
