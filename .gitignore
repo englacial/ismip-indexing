@@ -28,3 +28,6 @@ Thumbs.db
 
 # GCP
 gha-creds-*.json
+
+# local testing
+test-output/*

@@ -45,6 +45,8 @@ dependencies = [
     "scipy>=1.16.2",
     "virtualizarr>=2.2.1",
     "xarray>=2025.10.1",
+    "lithops>=3.6.2",
+    "kerchunk>=0.2.9",
 ]
 
 [project.optional-dependencies]

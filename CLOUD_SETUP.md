@@ -5,6 +5,11 @@ This document describes the cloud infrastructure setup required for running the 
 ## Prerequisites
 
 - Google Cloud SDK (`gcloud`) installed and configured
+    - Determine which email is authorized to see the project
+    - Make sure you are logged into gcloud with that email
+        - Check the active account with `gcloud auth list`
+            - If the account shows up but is not active do `gcloud config set account <your_account>`
+            - If not log in with `gcloud auth login`
 - Access to a GCP project with billing enabled
 - Permissions to create service accounts and IAM policies
 
