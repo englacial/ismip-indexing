@@ -23,9 +23,13 @@ Lithops requires a service account with proper permissions to deploy Cloud Funct
 export PROJECT_ID=$(gcloud config get-value project)
 ```
 
-For this project, the project ID is: `ds-englacial`
+For this project, the project ID is: `astera-englacial`
+
+
 
 ### 2. Create Service Account
+
+**If the service account was already created you can skip to Step 4.**
 
 ```bash
 gcloud iam service-accounts create lithops-executor \
@@ -51,13 +55,13 @@ Grant Storage Object Admin role (to read/write GCS buckets):
 gcloud projects add-iam-policy-binding $PROJECT_ID \
     --member="serviceAccount:lithops-executor@${PROJECT_ID}.iam.gserviceaccount.com" \
     --role="roles/storage.objectAdmin"
+
 ```
 
 ### 4. Download Service Account Key
 
 ```bash
-gcloud iam service-accounts keys create ~/lithops-sa-key.json \
-    --iam-account=lithops-executor@${PROJECT_ID}.iam.gserviceaccount.com
+gcloud iam service-accounts keys create ~/lithops-sa-key.json --iam-account=lithops-executor@${PROJECT_ID}.iam.gserviceaccount.com
 ```
 
 This creates a JSON key file at `~/lithops-sa-key.json`.
@@ -74,6 +78,7 @@ The `lithops.yaml` configuration file should reference the service account key:
 lithops:
     backend: gcp_functions
     storage: gcp_storage
+    data_limit: False
 
 gcp:
     region: us-west1
@@ -82,11 +87,34 @@ gcp:
 gcp_functions:
     region: us-west1
     runtime: ismip6-icechunk
+    runtime_memory: 8192
+    runtime_timeout: 540
+    project_id: astera-englacial
 
 gcp_storage:
-    storage_bucket: ismip6-icechunk
+    storage_bucket: ismip6-icechunk # Lithops uses storage_bucket, not bucket
     region: us-west1
 ```
+
+### Additional steps that Julius needed to reproduce
+- Get permission for service account on `astera-englacial` to be `'storage.admin'` on `gs://ismip6-icechunk`
+
+- Needed to manually activate the following APIS:
+    -  Cloud Pub/Sub 
+    - Cloud Functions
+    - Cloud Build
+    - Artifact Registry
+    - All of these might take a bit of time to activate.
+- The service account needed the following additional permissions:
+    - Command `gcloud projects add-iam-policy-binding astera-englacial \
+  --member=serviceAccount:lithops-executor@astera-englacial.iam.gserviceaccount.com \
+  --role=roles<your_role>`
+    - `pubsub.admin`
+    - `Cloud Functions Admin` (forgot the exact syntax)
+    - `iam.serviceAccountUser`
+- Downgrade to python 3.12
+    - Delete old function definitions (just to be sure)
+    - Add `gen: 2` to lithops config.
 
 ### Important Notes
 
@@ -112,8 +140,18 @@ gcp_storage:
 ## Build the runtime
 
 ```bash
-# lithops runtime delete ismip6-icechunk -c lithops.yaml
-lithops runtime build -f requirements.txt ismip6-icechunk -c lithops.yaml
-lithops runtime deploy ismip6-icechunk -c lithops.yaml
+# To create the requirements I exported the locked uv env 
+# `uv export --no-hashes --no-dev --no-editable > requirements.txt`
+# and then manually populated requirements-lithops.txt with the same versions
+# This could definitely be improved
+# Then build and deploy the runtime (If the deploy succeeds you should be good to go!)
+uv run lithops runtime build -f requirements-lithops.txt ismip6-icechunk -c lithops.yaml 
+uv run lithops runtime deploy ismip6-icechunk -c lithops.yaml
 ```
 
+## Running the script
+
+And then run the script with uv
+```
+uv run python virtualize_with_lithops_combine_variables.py
+```
