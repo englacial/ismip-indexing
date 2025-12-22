@@ -22,6 +22,7 @@ zarr.config.set({
     'async.concurrency': 5,
     'threading.max_workers': 5
 })
+# TODO: Check https://github.com/EarthStackLLC/ismip-indexing/pull/1#issuecomment-3682393880 for next steps
 # print(f"{zarr.config.get("async.concurrency")=}")
 
 # print(f"{icechunk.__version__=}")
