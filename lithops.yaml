@@ -5,14 +5,17 @@ lithops:
 
 gcp:
     region: us-west1
-    credentials_path: /Users/aimeebarciauskas/lithops-sa-key.json
+    credentials_path: ~/lithops-sa-key.json
 
 gcp_functions:
     region: us-west1
     runtime: ismip6-icechunk
-    runtime_memory: 8192
-    runtime_timeout: 540
-    project_id: ds-englacial
+    runtime_memory: 1024    
+    runtime_timeout: 300
+    project_id: astera-englacial
+    gen: 2
+    requirements: requirements-lithops.txt
 
 gcp_storage:
-    storage_bucket: ismip6-icechunk  # Lithops uses storage_bucket, not bucket
+    storage_bucket: ismip6-icechunk
+    region: us-west1
