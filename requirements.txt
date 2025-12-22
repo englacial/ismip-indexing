@@ -1,0 +1,32 @@
+# Mandatory Lithops packages
+google-cloud
+google-cloud-storage
+google-cloud-pubsub
+google-auth
+google-api-python-client
+numpy
+six
+requests
+redis
+pika
+scikit-learn
+diskcache
+cloudpickle
+ps-mem
+tblib
+PyYAML
+urllib3
+psutil
+
+# other packages
+lithops
+icechunk
+obstore
+xarray
+virtualizarr
+zarr
+numpy
+pandas
+h5netcdf
+gcsfs
+pyproj
