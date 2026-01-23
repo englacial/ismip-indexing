@@ -3,8 +3,10 @@ import { IcechunkStore } from "icechunk-js";
 import * as zarr from "zarrita";
 
 // ISMIP6 icechunk store URL
-const ICECHUNK_URL =
-  "https://storage.googleapis.com/ismip6-icechunk/12-07-2025/";
+// Use proxy in development to avoid CORS issues
+const ICECHUNK_URL = import.meta.env.DEV
+  ? "/gcs-proxy/ismip6-icechunk/12-07-2025/"
+  : "https://storage.googleapis.com/ismip6-icechunk/12-07-2025/";
 
 interface ViewerState {
   // Connection state
@@ -112,19 +114,24 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
       // List models from the store (top-level groups)
       const models = store.listChildren("");
 
-      // Build experiments map - for now use common experiments
-      // In a full implementation, we'd query each model's subgroups
+      // Build experiments map by querying each model's subgroups
       const experiments = new Map<string, string[]>();
       for (const model of models) {
-        experiments.set(model, COMMON_EXPERIMENTS);
+        const modelExps = store.listChildren(model);
+        experiments.set(model, modelExps);
       }
+
+      // Get first model's first experiment
+      const firstModel = models.length > 0 ? models[0] : null;
+      const firstModelExps = firstModel ? experiments.get(firstModel) : null;
+      const firstExp = firstModelExps && firstModelExps.length > 0 ? firstModelExps[0] : null;
 
       set({
         store,
         models,
         experiments,
-        selectedModel: models.length > 0 ? models[0] : null,
-        selectedExperiment: "ctrl_proj_std",
+        selectedModel: firstModel,
+        selectedExperiment: firstExp,
         isLoading: false,
       });
     } catch (err) {
@@ -137,12 +144,13 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
   },
 
   setSelectedModel: (model) => {
-    set({ selectedModel: model });
+    const experiments = get().experiments.get(model) || [];
+    const currentExp = get().selectedExperiment;
     // Reset experiment if not available for this model
-    const experiments = get().experiments.get(model);
-    if (experiments && !experiments.includes(get().selectedExperiment || "")) {
-      set({ selectedExperiment: experiments[0] || null });
-    }
+    const newExp = experiments.includes(currentExp || "")
+      ? currentExp
+      : (experiments[0] || null);
+    set({ selectedModel: model, selectedExperiment: newExp });
   },
 
   setSelectedExperiment: (experiment) => {
@@ -180,7 +188,8 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
 
     try {
       // Build the path to the variable array
-      const arrayPath = `${selectedModel}/${selectedExperiment}/${selectedVariable}`;
+      // Structure is: model/experiment/variable_group/variable_array
+      const arrayPath = `${selectedModel}/${selectedExperiment}/${selectedVariable}/${selectedVariable}`;
       console.log(`Loading: ${arrayPath}`);
 
       // Get a store resolved to this path
@@ -221,6 +230,9 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
 
       // Fetch the data
       const result = await zarr.get(arr, slice);
+      console.log("Zarr result:", result);
+      console.log("Result data type:", result.data.constructor.name);
+      console.log("Result shape:", result.shape);
 
       // Convert to Float32Array
       let data: Float32Array;
@@ -234,7 +246,16 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
         throw new Error(`Unexpected data type: ${typeof result.data}`);
       }
 
-      console.log(`Loaded ${data.length} values`);
+      // Debug: check data statistics
+      let min = Infinity, max = -Infinity, nonZeroCount = 0, nanCount = 0;
+      for (let i = 0; i < data.length; i++) {
+        const v = data[i];
+        if (isNaN(v)) { nanCount++; continue; }
+        if (v !== 0) nonZeroCount++;
+        if (v < min) min = v;
+        if (v > max) max = v;
+      }
+      console.log(`Loaded ${data.length} values, min=${min}, max=${max}, nonZero=${nonZeroCount}, NaN=${nanCount}`);
 
       set({
         currentData: data,
