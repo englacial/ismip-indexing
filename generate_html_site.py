@@ -100,6 +100,28 @@ def get_html_header(title: str, breadcrumb: str = '') -> str:
             border-bottom: 3px solid #1976d2;
             padding-bottom: 10px;
         }}
+        .nav {{
+            margin-bottom: 20px;
+            padding: 10px 0;
+            border-bottom: 1px solid #e0e0e0;
+        }}
+        .nav a {{
+            display: inline-block;
+            padding: 8px 16px;
+            background-color: #1976d2;
+            color: white;
+            text-decoration: none;
+            border-radius: 4px;
+            margin-right: 10px;
+            font-size: 14px;
+        }}
+        .nav a:hover {{
+            background-color: #1565c0;
+            text-decoration: none;
+        }}
+        .nav a.active {{
+            background-color: #0d47a1;
+        }}
         .breadcrumb {{
             color: #666;
             margin-bottom: 20px;
@@ -207,6 +229,10 @@ def get_html_header(title: str, breadcrumb: str = '') -> str:
 </head>
 <body>
     <div class="container">
+        <div class="nav">
+            <a href="index.html">Coverage Index</a>
+            <a href="viewer/index.html">Interactive Viewer</a>
+        </div>
         {breadcrumb}
         <h1>{title}</h1>
 """
