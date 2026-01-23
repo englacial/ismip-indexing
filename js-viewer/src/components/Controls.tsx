@@ -3,32 +3,33 @@ import { COLORMAP_NAMES } from "../utils/colormap";
 
 export function Controls() {
   const {
-    models,
-    experiments,
+    panels,
     variables,
-    selectedModel,
-    selectedExperiment,
     selectedVariable,
     timeIndex,
-    maxTimeIndex,
     colormap,
     vmin,
     vmax,
     autoRange,
-    isLoading,
-    setSelectedModel,
-    setSelectedExperiment,
     setSelectedVariable,
     setTimeIndex,
     setColormap,
     setColorRange,
     setAutoRange,
-    loadData,
+    addPanel,
+    loadAllPanels,
   } = useViewerStore();
 
-  const availableExperiments = selectedModel
-    ? experiments.get(selectedModel) || []
-    : [];
+  // Find max time index across all panels
+  const maxTimeIndex = Math.max(...panels.map((p) => p.maxTimeIndex), 0);
+
+  // Check if any panel is loading
+  const anyLoading = panels.some((p) => p.isLoading);
+
+  // Check if all panels have model/experiment selected
+  const allPanelsConfigured = panels.every(
+    (p) => p.selectedModel && p.selectedExperiment
+  );
 
   return (
     <div
@@ -41,42 +42,48 @@ export function Controls() {
       }}
     >
       <h2 style={{ margin: "0 0 16px 0", fontSize: "18px", fontWeight: 600 }}>
-        ISMIP6 Viewer
+        ISMIP6 Comparison
       </h2>
 
-      {/* Model Selection */}
+      {/* Panel Management */}
       <div style={{ marginBottom: "16px" }}>
-        <label
+        <div
           style={{
-            display: "block",
-            marginBottom: "4px",
-            fontSize: "13px",
-            fontWeight: 500,
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            marginBottom: "8px",
           }}
         >
-          Model
-        </label>
-        <select
-          value={selectedModel || ""}
-          onChange={(e) => setSelectedModel(e.target.value)}
-          style={{
-            width: "100%",
-            padding: "8px",
-            borderRadius: "4px",
-            border: "1px solid #ccc",
-            fontSize: "14px",
-          }}
-        >
-          <option value="">Select model...</option>
-          {models.map((model) => (
-            <option key={model} value={model}>
-              {model}
-            </option>
-          ))}
-        </select>
+          <label
+            style={{
+              fontSize: "13px",
+              fontWeight: 500,
+            }}
+          >
+            Panels: {panels.length}
+          </label>
+          <button
+            onClick={addPanel}
+            style={{
+              padding: "4px 12px",
+              backgroundColor: "#4caf50",
+              color: "white",
+              border: "none",
+              borderRadius: "4px",
+              fontSize: "12px",
+              cursor: "pointer",
+            }}
+          >
+            + Add Panel
+          </button>
+        </div>
+        <div style={{ fontSize: "11px", color: "#666" }}>
+          Click a panel to select it. Each panel can show a different model/experiment.
+        </div>
       </div>
 
-      {/* Experiment Selection */}
+      {/* Variable Selection (shared across all panels) */}
       <div style={{ marginBottom: "16px" }}>
         <label
           style={{
@@ -86,40 +93,7 @@ export function Controls() {
             fontWeight: 500,
           }}
         >
-          Experiment
-        </label>
-        <select
-          value={selectedExperiment || ""}
-          onChange={(e) => setSelectedExperiment(e.target.value)}
-          disabled={!selectedModel}
-          style={{
-            width: "100%",
-            padding: "8px",
-            borderRadius: "4px",
-            border: "1px solid #ccc",
-            fontSize: "14px",
-          }}
-        >
-          <option value="">Select experiment...</option>
-          {availableExperiments.map((exp) => (
-            <option key={exp} value={exp}>
-              {exp}
-            </option>
-          ))}
-        </select>
-      </div>
-
-      {/* Variable Selection */}
-      <div style={{ marginBottom: "16px" }}>
-        <label
-          style={{
-            display: "block",
-            marginBottom: "4px",
-            fontSize: "13px",
-            fontWeight: 500,
-          }}
-        >
-          Variable
+          Variable (all panels)
         </label>
         <select
           value={selectedVariable || ""}
@@ -140,30 +114,25 @@ export function Controls() {
         </select>
       </div>
 
-      {/* Load Data Button */}
+      {/* Load All Data Button */}
       <button
-        onClick={loadData}
-        disabled={isLoading || !selectedModel || !selectedExperiment}
+        onClick={loadAllPanels}
+        disabled={anyLoading || !allPanelsConfigured}
         style={{
           width: "100%",
           padding: "10px",
           marginBottom: "24px",
           backgroundColor:
-            isLoading || !selectedModel || !selectedExperiment
-              ? "#ccc"
-              : "#1976d2",
+            anyLoading || !allPanelsConfigured ? "#ccc" : "#1976d2",
           color: "white",
           border: "none",
           borderRadius: "4px",
           fontSize: "14px",
           fontWeight: 500,
-          cursor:
-            isLoading || !selectedModel || !selectedExperiment
-              ? "not-allowed"
-              : "pointer",
+          cursor: anyLoading || !allPanelsConfigured ? "not-allowed" : "pointer",
         }}
       >
-        {isLoading ? "Loading..." : "Load Data"}
+        {anyLoading ? "Loading..." : "Load All Panels"}
       </button>
 
       {/* Time Slider */}
@@ -190,7 +159,9 @@ export function Controls() {
         </div>
       )}
 
-      <hr style={{ margin: "16px 0", border: "none", borderTop: "1px solid #e0e0e0" }} />
+      <hr
+        style={{ margin: "16px 0", border: "none", borderTop: "1px solid #e0e0e0" }}
+      />
 
       {/* Visualization Settings */}
       <h3 style={{ margin: "0 0 12px 0", fontSize: "14px", fontWeight: 600 }}>
@@ -258,9 +229,7 @@ export function Controls() {
               <input
                 type="number"
                 value={vmin}
-                onChange={(e) =>
-                  setColorRange(parseFloat(e.target.value), vmax)
-                }
+                onChange={(e) => setColorRange(parseFloat(e.target.value), vmax)}
                 style={{
                   width: "100%",
                   padding: "6px",
@@ -283,9 +252,7 @@ export function Controls() {
               <input
                 type="number"
                 value={vmax}
-                onChange={(e) =>
-                  setColorRange(vmin, parseFloat(e.target.value))
-                }
+                onChange={(e) => setColorRange(vmin, parseFloat(e.target.value))}
                 style={{
                   width: "100%",
                   padding: "6px",
@@ -303,6 +270,53 @@ export function Controls() {
       <div style={{ fontSize: "12px", color: "#666" }}>
         Current range: {vmin.toFixed(1)} - {vmax.toFixed(1)}
       </div>
+
+      <hr
+        style={{ margin: "16px 0", border: "none", borderTop: "1px solid #e0e0e0" }}
+      />
+
+      {/* Colorbar */}
+      <div>
+        <label
+          style={{
+            display: "block",
+            marginBottom: "8px",
+            fontSize: "13px",
+            fontWeight: 500,
+          }}
+        >
+          Color Scale
+        </label>
+        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+          <div style={{ fontSize: "11px", width: "40px", textAlign: "right" }}>
+            {vmin.toFixed(0)}
+          </div>
+          <div
+            style={{
+              flex: 1,
+              height: "20px",
+              background: `linear-gradient(to right, ${getColormapGradient(colormap)})`,
+              borderRadius: "2px",
+            }}
+          />
+          <div style={{ fontSize: "11px", width: "40px" }}>{vmax.toFixed(0)}</div>
+        </div>
+      </div>
     </div>
   );
+}
+
+function getColormapGradient(colormap: string): string {
+  const gradients: Record<string, string> = {
+    viridis: "#440154, #3b528b, #21918c, #5ec962, #fde725",
+    plasma: "#0d0887, #7e03a8, #cc4778, #f89540, #f0f921",
+    inferno: "#000004, #57106e, #bc3754, #f98e09, #fcffa4",
+    magma: "#000004, #51127c, #b73779, #fc8961, #fcfdbf",
+    cividis: "#1f9e89, #35b779, #6ece58, #a5db36, #fde725",
+    turbo: "#30123b, #23bdd8, #d9f537, #f4650b, #7a0403",
+    coolwarm: "#3b4cc0, #819fce, #dddddd, #f4987a, #b40426",
+    RdBu: "#67001f, #d6604d, #f7f7f7, #4393c3, #053061",
+    gray: "#000000, #ffffff",
+  };
+  return gradients[colormap] || gradients.viridis;
 }

@@ -1,20 +1,42 @@
 import { useEffect } from "react";
-import { Viewer } from "./components/Viewer";
+import { Panel } from "./components/Panel";
 import { Controls } from "./components/Controls";
 import { useViewerStore } from "./stores/viewerStore";
 
 export default function App() {
-  const { initialize, isLoading, error } = useViewerStore();
+  const { initialize, isInitializing, initError, panels, activePanelId } =
+    useViewerStore();
 
   useEffect(() => {
     initialize();
   }, [initialize]);
 
+  // Calculate grid layout based on number of panels
+  const getGridStyle = (count: number): React.CSSProperties => {
+    if (count === 1) {
+      return { gridTemplateColumns: "1fr", gridTemplateRows: "1fr" };
+    } else if (count === 2) {
+      return { gridTemplateColumns: "1fr 1fr", gridTemplateRows: "1fr" };
+    } else if (count <= 4) {
+      return { gridTemplateColumns: "1fr 1fr", gridTemplateRows: "1fr 1fr" };
+    } else if (count <= 6) {
+      return { gridTemplateColumns: "1fr 1fr 1fr", gridTemplateRows: "1fr 1fr" };
+    } else {
+      // For more than 6, use 3 columns with as many rows as needed
+      const rows = Math.ceil(count / 3);
+      return {
+        gridTemplateColumns: "1fr 1fr 1fr",
+        gridTemplateRows: Array(rows).fill("1fr").join(" "),
+      };
+    }
+  };
+
   return (
     <div style={{ display: "flex", width: "100%", height: "100%" }}>
       <Controls />
       <div style={{ flex: 1, position: "relative" }}>
-        {isLoading && (
+        {/* Initialization loading */}
+        {isInitializing && (
           <div
             style={{
               position: "absolute",
@@ -28,10 +50,12 @@ export default function App() {
               boxShadow: "0 2px 10px rgba(0,0,0,0.1)",
             }}
           >
-            Loading...
+            Connecting to data store...
           </div>
         )}
-        {error && (
+
+        {/* Initialization error */}
+        {initError && (
           <div
             style={{
               position: "absolute",
@@ -45,10 +69,31 @@ export default function App() {
               maxWidth: "400px",
             }}
           >
-            {error}
+            {initError}
           </div>
         )}
-        <Viewer />
+
+        {/* Panel grid */}
+        <div
+          style={{
+            display: "grid",
+            ...getGridStyle(panels.length),
+            gap: "8px",
+            padding: "8px",
+            width: "100%",
+            height: "100%",
+            boxSizing: "border-box",
+          }}
+        >
+          {panels.map((panel) => (
+            <Panel
+              key={panel.id}
+              panel={panel}
+              isActive={panel.id === activePanelId}
+              canRemove={panels.length > 1}
+            />
+          ))}
+        </div>
       </div>
     </div>
   );
