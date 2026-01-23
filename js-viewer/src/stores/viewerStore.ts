@@ -12,10 +12,22 @@ const ICECHUNK_URL = import.meta.env.DEV
   ? "/gcs-proxy/ismip6-icechunk/12-07-2025/"
   : "https://storage.googleapis.com/ismip6-icechunk/12-07-2025/";
 
-interface ViewerState {
-  // Connection state
+// Panel represents a single visualization panel
+export interface Panel {
+  id: string;
+  selectedModel: string | null;
+  selectedExperiment: string | null;
+  currentData: Float32Array | null;
+  dataShape: number[] | null;
   isLoading: boolean;
   error: string | null;
+  maxTimeIndex: number;
+}
+
+interface ViewerState {
+  // Connection state
+  isInitializing: boolean;
+  initError: string | null;
   store: IcechunkStore | null;
 
   // Available data
@@ -23,33 +35,45 @@ interface ViewerState {
   experiments: Map<string, string[]>;
   variables: string[];
 
-  // Selection state
-  selectedModel: string | null;
-  selectedExperiment: string | null;
+  // Panels
+  panels: Panel[];
+  activePanelId: string | null;
+
+  // Shared settings (apply to all panels)
   selectedVariable: string | null;
   timeIndex: number;
-  maxTimeIndex: number;
-
-  // Visualization settings
   colormap: string;
   vmin: number;
   vmax: number;
   autoRange: boolean;
 
-  // Data
-  currentData: Float32Array | null;
-  dataShape: number[] | null;
+  // Shared view state for linked zoom/pan
+  viewState: {
+    target: [number, number, number];
+    zoom: number;
+  } | null;
+
+  // Shared hover state for cross-panel comparison
+  hoverGridPosition: { gridX: number; gridY: number } | null;
+  hoveredPanelId: string | null;
 
   // Actions
   initialize: () => Promise<void>;
-  setSelectedModel: (model: string) => void;
-  setSelectedExperiment: (experiment: string) => void;
+  addPanel: () => void;
+  removePanel: (panelId: string) => void;
+  setActivePanel: (panelId: string) => void;
+  setPanelModel: (panelId: string, model: string) => void;
+  setPanelExperiment: (panelId: string, experiment: string) => void;
   setSelectedVariable: (variable: string) => void;
   setTimeIndex: (index: number) => void;
   setColormap: (colormap: string) => void;
   setColorRange: (vmin: number, vmax: number) => void;
   setAutoRange: (auto: boolean) => void;
-  loadData: () => Promise<void>;
+  setViewState: (viewState: { target: [number, number, number]; zoom: number }) => void;
+  setHoverGridPosition: (position: { gridX: number; gridY: number } | null, panelId?: string | null) => void;
+  getValueAtGridPosition: (panelId: string, gridX: number, gridY: number) => number | null;
+  loadPanelData: (panelId: string) => Promise<void>;
+  loadAllPanels: () => Promise<void>;
 }
 
 // Common ISMIP6 variables (2D gridded)
@@ -70,47 +94,50 @@ const ISMIP6_VARIABLES = [
   "dlithkdt", // ice thickness change rate
 ];
 
-// Common experiments
-const COMMON_EXPERIMENTS = [
-  "ctrl_proj_std",
-  "hist_std",
-  "exp01",
-  "exp02",
-  "exp03",
-  "exp04",
-  "exp05",
-  "exp06",
-  "exp07",
-  "exp08",
-  "exp09",
-  "exp10",
-  "exp11",
-  "exp12",
-  "exp13",
-];
+let panelIdCounter = 0;
+function generatePanelId(): string {
+  return `panel-${++panelIdCounter}`;
+}
+
+function createEmptyPanel(): Panel {
+  return {
+    id: generatePanelId(),
+    selectedModel: null,
+    selectedExperiment: null,
+    currentData: null,
+    dataShape: null,
+    isLoading: false,
+    error: null,
+    maxTimeIndex: 0,
+  };
+}
 
 export const useViewerStore = create<ViewerState>((set, get) => ({
   // Initial state
-  isLoading: false,
-  error: null,
+  isInitializing: false,
+  initError: null,
   store: null,
   models: [],
   experiments: new Map(),
   variables: ISMIP6_VARIABLES,
-  selectedModel: null,
-  selectedExperiment: null,
+
+  // Start with one empty panel
+  panels: [createEmptyPanel()],
+  activePanelId: null,
+
+  // Shared settings
   selectedVariable: "lithk",
   timeIndex: 0,
-  maxTimeIndex: 0,
   colormap: "viridis",
   vmin: 0,
   vmax: 4000,
   autoRange: true,
-  currentData: null,
-  dataShape: null,
+  viewState: null,
+  hoverGridPosition: null,
+  hoveredPanelId: null,
 
   initialize: async () => {
-    set({ isLoading: true, error: null });
+    set({ isInitializing: true, initError: null });
     try {
       // Open the icechunk store
       // In dev mode, route virtual chunk URLs through the proxy
@@ -139,76 +166,160 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
         experiments.set(model, modelExps);
       }
 
-      // Get first model's first experiment
+      // Get first model's first experiment for the initial panel
       const firstModel = models.length > 0 ? models[0] : null;
       const firstModelExps = firstModel ? experiments.get(firstModel) : null;
       const firstExp = firstModelExps && firstModelExps.length > 0 ? firstModelExps[0] : null;
+
+      // Initialize first panel with defaults
+      const initialPanel = createEmptyPanel();
+      initialPanel.selectedModel = firstModel;
+      initialPanel.selectedExperiment = firstExp;
 
       set({
         store,
         models,
         experiments,
-        selectedModel: firstModel,
-        selectedExperiment: firstExp,
-        isLoading: false,
+        panels: [initialPanel],
+        activePanelId: initialPanel.id,
+        isInitializing: false,
       });
     } catch (err) {
       console.error("Failed to initialize:", err);
       set({
-        error: err instanceof Error ? err.message : "Failed to initialize",
-        isLoading: false,
+        initError: err instanceof Error ? err.message : "Failed to initialize",
+        isInitializing: false,
       });
     }
   },
 
-  setSelectedModel: (model) => {
-    const experiments = get().experiments.get(model) || [];
-    const currentExp = get().selectedExperiment;
-    // Reset experiment if not available for this model
-    const newExp = experiments.includes(currentExp || "")
-      ? currentExp
-      : (experiments[0] || null);
-    set({ selectedModel: model, selectedExperiment: newExp });
+  addPanel: () => {
+    const { panels, models, experiments } = get();
+    const newPanel = createEmptyPanel();
+
+    // Initialize with first available model/experiment
+    if (models.length > 0) {
+      newPanel.selectedModel = models[0];
+      const modelExps = experiments.get(models[0]);
+      if (modelExps && modelExps.length > 0) {
+        newPanel.selectedExperiment = modelExps[0];
+      }
+    }
+
+    set({
+      panels: [...panels, newPanel],
+      activePanelId: newPanel.id,
+    });
   },
 
-  setSelectedExperiment: (experiment) => {
-    set({ selectedExperiment: experiment });
+  removePanel: (panelId: string) => {
+    const { panels, activePanelId } = get();
+    if (panels.length <= 1) return; // Keep at least one panel
+
+    const newPanels = panels.filter((p) => p.id !== panelId);
+    const newActiveId =
+      activePanelId === panelId
+        ? newPanels[0]?.id || null
+        : activePanelId;
+
+    set({ panels: newPanels, activePanelId: newActiveId });
   },
 
-  setSelectedVariable: (variable) => {
+  setActivePanel: (panelId: string) => {
+    set({ activePanelId: panelId });
+  },
+
+  setPanelModel: (panelId: string, model: string) => {
+    const { panels, experiments } = get();
+    const newPanels = panels.map((p) => {
+      if (p.id !== panelId) return p;
+
+      const modelExps = experiments.get(model) || [];
+      const currentExp = p.selectedExperiment;
+      // Reset experiment if not available for this model
+      const newExp = modelExps.includes(currentExp || "")
+        ? currentExp
+        : modelExps[0] || null;
+
+      return {
+        ...p,
+        selectedModel: model,
+        selectedExperiment: newExp,
+      };
+    });
+    set({ panels: newPanels });
+  },
+
+  setPanelExperiment: (panelId: string, experiment: string) => {
+    const { panels } = get();
+    const newPanels = panels.map((p) =>
+      p.id === panelId ? { ...p, selectedExperiment: experiment } : p
+    );
+    set({ panels: newPanels });
+  },
+
+  setSelectedVariable: (variable: string) => {
     set({ selectedVariable: variable });
   },
 
-  setTimeIndex: (index) => {
-    set({ timeIndex: Math.max(0, Math.min(index, get().maxTimeIndex)) });
+  setTimeIndex: (index: number) => {
+    // Find max time index across all panels
+    const maxTime = Math.max(...get().panels.map((p) => p.maxTimeIndex), 0);
+    set({ timeIndex: Math.max(0, Math.min(index, maxTime)) });
   },
 
-  setColormap: (colormap) => {
+  setColormap: (colormap: string) => {
     set({ colormap });
   },
 
-  setColorRange: (vmin, vmax) => {
+  setColorRange: (vmin: number, vmax: number) => {
     set({ vmin, vmax, autoRange: false });
   },
 
-  setAutoRange: (auto) => {
+  setAutoRange: (auto: boolean) => {
     set({ autoRange: auto });
   },
 
-  loadData: async () => {
-    const { store, selectedModel, selectedExperiment, selectedVariable, timeIndex } =
-      get();
-    if (!store || !selectedModel || !selectedExperiment || !selectedVariable) {
+  setViewState: (viewState) => {
+    set({ viewState });
+  },
+
+  setHoverGridPosition: (position, panelId = null) => {
+    set({ hoverGridPosition: position, hoveredPanelId: panelId });
+  },
+
+  getValueAtGridPosition: (panelId: string, gridX: number, gridY: number) => {
+    const { panels } = get();
+    const panel = panels.find((p) => p.id === panelId);
+    if (!panel?.currentData || !panel?.dataShape) return null;
+
+    const [, width] = panel.dataShape;
+    const idx = gridY * width + gridX;
+    const value = panel.currentData[idx];
+
+    if (isNaN(value) || !isFinite(value) || value > 10000) return null;
+    return value;
+  },
+
+  loadPanelData: async (panelId: string) => {
+    const { store, panels, selectedVariable, timeIndex } = get();
+    const panel = panels.find((p) => p.id === panelId);
+
+    if (!store || !panel || !panel.selectedModel || !panel.selectedExperiment || !selectedVariable) {
       return;
     }
 
-    set({ isLoading: true, error: null });
+    // Update panel loading state
+    set({
+      panels: panels.map((p) =>
+        p.id === panelId ? { ...p, isLoading: true, error: null } : p
+      ),
+    });
 
     try {
       // Build the path to the variable array
-      // Structure is: model/experiment/variable_group/variable_array
-      const arrayPath = `${selectedModel}/${selectedExperiment}/${selectedVariable}/${selectedVariable}`;
-      console.log(`Loading: ${arrayPath}`);
+      const arrayPath = `${panel.selectedModel}/${panel.selectedExperiment}/${selectedVariable}/${selectedVariable}`;
+      console.log(`[Panel ${panelId}] Loading: ${arrayPath}`);
 
       // Get a store resolved to this path
       const arrayStore = store.resolve(arrayPath);
@@ -218,7 +329,7 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
 
       // Get array shape and determine time dimension
       const shape = arr.shape;
-      console.log(`Array shape: ${shape}`);
+      console.log(`[Panel ${panelId}] Array shape: ${shape}`);
 
       let maxTime = 0;
       let dataShape: number[];
@@ -233,8 +344,6 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
         throw new Error(`Unexpected array shape: ${shape}`);
       }
 
-      set({ maxTimeIndex: maxTime });
-
       // Determine slice based on dimensions
       let slice: (number | null)[];
       if (shape.length === 3) {
@@ -248,9 +357,7 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
 
       // Fetch the data
       const result = await zarr.get(arr, slice);
-      console.log("Zarr result:", result);
-      console.log("Result data type:", result.data.constructor.name);
-      console.log("Result shape:", result.shape);
+      console.log(`[Panel ${panelId}] Zarr result shape:`, result.shape);
 
       // Convert to Float32Array
       let data: Float32Array;
@@ -265,54 +372,81 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
       }
 
       // Debug: check data statistics
-      let min = Infinity, max = -Infinity, nonZeroCount = 0, nanCount = 0;
+      let min = Infinity,
+        max = -Infinity,
+        nonZeroCount = 0,
+        nanCount = 0;
       for (let i = 0; i < data.length; i++) {
         const v = data[i];
-        if (isNaN(v)) { nanCount++; continue; }
+        if (isNaN(v)) {
+          nanCount++;
+          continue;
+        }
         if (v !== 0) nonZeroCount++;
         if (v < min) min = v;
         if (v > max) max = v;
       }
-      console.log(`Loaded ${data.length} values, min=${min}, max=${max}, nonZero=${nonZeroCount}, NaN=${nanCount}`);
+      console.log(
+        `[Panel ${panelId}] Loaded ${data.length} values, min=${min}, max=${max}, nonZero=${nonZeroCount}, NaN=${nanCount}`
+      );
 
+      // Update panel with loaded data
       set({
-        currentData: data,
-        dataShape,
-        isLoading: false,
+        panels: get().panels.map((p) =>
+          p.id === panelId
+            ? { ...p, currentData: data, dataShape, maxTimeIndex: maxTime, isLoading: false }
+            : p
+        ),
       });
 
-      // Auto-range if enabled
+      // Auto-range if enabled (compute across all loaded panels)
       if (get().autoRange) {
-        // Filter valid values and compute percentiles
-        // Exclude fill values (typically very large numbers like 1e20 or negative)
-        // Ice thickness should be 0-10000 meters realistically
-        const MAX_VALID_VALUE = 10000;
-        const validValues: number[] = [];
-        for (let i = 0; i < data.length; i++) {
-          const v = data[i];
-          if (!isNaN(v) && isFinite(v) && v > 0 && v < MAX_VALID_VALUE) {
-            validValues.push(v);
-          }
-        }
-
-        console.log(
-          `[autoRange] Found ${validValues.length} valid values out of ${data.length}`,
-        );
-
-        if (validValues.length > 0) {
-          validValues.sort((a, b) => a - b);
-          const p5 = validValues[Math.floor(validValues.length * 0.05)];
-          const p95 = validValues[Math.floor(validValues.length * 0.95)];
-          console.log(`[autoRange] p5=${p5}, p95=${p95}`);
-          set({ vmin: p5, vmax: p95 });
-        }
+        computeAutoRange(get);
       }
     } catch (err) {
-      console.error("Failed to load data:", err);
+      console.error(`[Panel ${panelId}] Failed to load data:`, err);
       set({
-        error: err instanceof Error ? err.message : "Failed to load data",
-        isLoading: false,
+        panels: get().panels.map((p) =>
+          p.id === panelId
+            ? {
+                ...p,
+                error: err instanceof Error ? err.message : "Failed to load data",
+                isLoading: false,
+              }
+            : p
+        ),
       });
     }
   },
+
+  loadAllPanels: async () => {
+    const { panels, loadPanelData } = get();
+    // Load all panels in parallel
+    await Promise.all(panels.map((p) => loadPanelData(p.id)));
+  },
 }));
+
+// Helper to compute auto range across all loaded panels
+function computeAutoRange(get: () => ViewerState) {
+  const { panels } = get();
+  const MAX_VALID_VALUE = 10000;
+  const allValidValues: number[] = [];
+
+  for (const panel of panels) {
+    if (!panel.currentData) continue;
+    for (let i = 0; i < panel.currentData.length; i++) {
+      const v = panel.currentData[i];
+      if (!isNaN(v) && isFinite(v) && v > 0 && v < MAX_VALID_VALUE) {
+        allValidValues.push(v);
+      }
+    }
+  }
+
+  if (allValidValues.length > 0) {
+    allValidValues.sort((a, b) => a - b);
+    const p5 = allValidValues[Math.floor(allValidValues.length * 0.05)];
+    const p95 = allValidValues[Math.floor(allValidValues.length * 0.95)];
+    console.log(`[autoRange] Combined p5=${p5}, p95=${p95} from ${allValidValues.length} values`);
+    useViewerStore.setState({ vmin: p5, vmax: p95 });
+  }
+}
