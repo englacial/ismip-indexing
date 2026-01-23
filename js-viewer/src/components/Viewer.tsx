@@ -17,11 +17,15 @@ const Y_MIN = -3040000;
 const X_MAX = X_MIN + GRID_WIDTH * CELL_SIZE;
 const Y_MAX = Y_MIN + GRID_HEIGHT * CELL_SIZE;
 
+// Center of the grid
+const CENTER_X = (X_MIN + X_MAX) / 2;
+const CENTER_Y = (Y_MIN + Y_MAX) / 2;
+
 const INITIAL_VIEW_STATE = {
-  target: [0, 0, 0] as [number, number, number],
-  zoom: -3,
-  minZoom: -5,
-  maxZoom: 2,
+  target: [CENTER_X, CENTER_Y, 0] as [number, number, number],
+  zoom: -13, // ~6 million meters / ~1000 pixels = need zoom around -12 to -13
+  minZoom: -16,
+  maxZoom: 0,
 };
 
 export function Viewer() {
@@ -90,6 +94,8 @@ export function Viewer() {
       >
         <div>Grid: {GRID_WIDTH} x {GRID_HEIGHT} @ 8km</div>
         <div>Projection: EPSG:3031</div>
+        {currentData && <div>Color range: {vmin.toFixed(1)} - {vmax.toFixed(1)}</div>}
+        {dataShape && <div>Data shape: {dataShape.join(" x ")}</div>}
       </div>
 
       {/* Colorbar */}

@@ -11,4 +11,13 @@ export default defineConfig({
   optimizeDeps: {
     include: ["@deck.gl/core", "@deck.gl/layers", "@deck.gl/react"],
   },
+  server: {
+    proxy: {
+      "/gcs-proxy": {
+        target: "https://storage.googleapis.com",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/gcs-proxy/, ""),
+      },
+    },
+  },
 });
