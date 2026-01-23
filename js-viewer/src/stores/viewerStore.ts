@@ -1,6 +1,10 @@
 import { create } from "zustand";
 import { IcechunkStore } from "icechunk-js";
 import * as zarr from "zarrita";
+import { registerCodecs } from "../utils/codecs";
+
+// Register numcodecs codecs at module load time
+registerCodecs();
 
 // ISMIP6 icechunk store URL
 // Use proxy in development to avoid CORS issues
@@ -109,7 +113,21 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
     set({ isLoading: true, error: null });
     try {
       // Open the icechunk store
-      const store = await IcechunkStore.open(ICECHUNK_URL, { ref: "main" });
+      // In dev mode, route virtual chunk URLs through the proxy
+      const virtualUrlTransformer = import.meta.env.DEV
+        ? (url: string) => {
+            // Transform gs://ismip6/... to /ismip6-proxy/...
+            if (url.startsWith("gs://ismip6/")) {
+              return url.replace("gs://ismip6/", "/ismip6-proxy/");
+            }
+            return url;
+          }
+        : undefined;
+
+      const store = await IcechunkStore.open(ICECHUNK_URL, {
+        ref: "main",
+        virtualUrlTransformer,
+      });
 
       // List models from the store (top-level groups)
       const models = store.listChildren("");
@@ -266,18 +284,26 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
       // Auto-range if enabled
       if (get().autoRange) {
         // Filter valid values and compute percentiles
+        // Exclude fill values (typically very large numbers like 1e20 or negative)
+        // Ice thickness should be 0-10000 meters realistically
+        const MAX_VALID_VALUE = 10000;
         const validValues: number[] = [];
         for (let i = 0; i < data.length; i++) {
           const v = data[i];
-          if (!isNaN(v) && isFinite(v) && v !== 0) {
+          if (!isNaN(v) && isFinite(v) && v > 0 && v < MAX_VALID_VALUE) {
             validValues.push(v);
           }
         }
+
+        console.log(
+          `[autoRange] Found ${validValues.length} valid values out of ${data.length}`,
+        );
 
         if (validValues.length > 0) {
           validValues.sort((a, b) => a - b);
           const p5 = validValues[Math.floor(validValues.length * 0.05)];
           const p95 = validValues[Math.floor(validValues.length * 0.95)];
+          console.log(`[autoRange] p5=${p5}, p95=${p95}`);
           set({ vmin: p5, vmax: p95 });
         }
       }

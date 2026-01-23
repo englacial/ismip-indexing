@@ -156,6 +156,9 @@ export function createColormapTexture(
   return data;
 }
 
+// Maximum valid value for ice sheet data (fill values are typically 1e20+)
+const MAX_VALID_VALUE = 10000;
+
 export function dataToRGBA(
   data: Float32Array,
   width: number,
@@ -171,8 +174,9 @@ export function dataToRGBA(
     const value = data[i];
     const pixelIdx = i * 4;
 
-    if (isNaN(value) || !isFinite(value)) {
-      // Transparent for invalid values
+    // Treat NaN, Infinity, and fill values (> MAX_VALID_VALUE) as transparent
+    if (isNaN(value) || !isFinite(value) || value > MAX_VALID_VALUE || value < 0) {
+      // Transparent for invalid/fill values
       rgba[pixelIdx] = 0;
       rgba[pixelIdx + 1] = 0;
       rgba[pixelIdx + 2] = 0;

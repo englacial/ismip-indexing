@@ -1,6 +1,6 @@
-import { useMemo } from "react";
+import { useMemo, useState, useCallback } from "react";
 import { DeckGL } from "@deck.gl/react";
-import { OrthographicView } from "@deck.gl/core";
+import { OrthographicView, PickingInfo } from "@deck.gl/core";
 import { BitmapLayer } from "@deck.gl/layers";
 import { useViewerStore } from "../stores/viewerStore";
 import { dataToRGBA } from "../utils/colormap";
@@ -30,6 +30,13 @@ const INITIAL_VIEW_STATE = {
 
 export function Viewer() {
   const { currentData, dataShape, colormap, vmin, vmax } = useViewerStore();
+  const [hoverInfo, setHoverInfo] = useState<{
+    x: number;
+    y: number;
+    value: number | null;
+    gridX: number;
+    gridY: number;
+  } | null>(null);
 
   const imageData = useMemo(() => {
     if (!currentData || !dataShape) return null;
@@ -49,8 +56,60 @@ export function Viewer() {
     imgData.data.set(rgba);
     ctx.putImageData(imgData, 0, 0);
 
-    return canvas.toDataURL();
+    // Flip vertically for proper orientation (y=0 at bottom in EPSG:3031)
+    const flippedCanvas = document.createElement("canvas");
+    flippedCanvas.width = width;
+    flippedCanvas.height = height;
+    const flippedCtx = flippedCanvas.getContext("2d");
+    if (!flippedCtx) return null;
+
+    flippedCtx.translate(0, height);
+    flippedCtx.scale(1, -1);
+    flippedCtx.drawImage(canvas, 0, 0);
+
+    return flippedCanvas.toDataURL();
   }, [currentData, dataShape, colormap, vmin, vmax]);
+
+  // Handle mouse hover to show data values
+  const onHover = useCallback(
+    (info: PickingInfo) => {
+      if (!currentData || !dataShape) {
+        setHoverInfo(null);
+        return;
+      }
+
+      const { coordinate, x, y } = info;
+      if (!coordinate) {
+        setHoverInfo(null);
+        return;
+      }
+
+      // Convert world coordinates to grid indices
+      const [worldX, worldY] = coordinate;
+      const gridX = Math.floor((worldX - X_MIN) / CELL_SIZE);
+      const gridY = Math.floor((worldY - Y_MIN) / CELL_SIZE);
+
+      // Check bounds
+      if (gridX < 0 || gridX >= GRID_WIDTH || gridY < 0 || gridY >= GRID_HEIGHT) {
+        setHoverInfo(null);
+        return;
+      }
+
+      // Get data value (data is row-major, image already flipped so no Y inversion needed)
+      const [, width] = dataShape;
+      const idx = gridY * width + gridX;
+      const value = currentData[idx];
+
+      setHoverInfo({
+        x,
+        y,
+        value: isNaN(value) || !isFinite(value) || value > 10000 ? null : value,
+        gridX,
+        gridY,
+      });
+    },
+    [currentData, dataShape]
+  );
 
   const layers = useMemo(() => {
     if (!imageData) return [];
@@ -78,6 +137,7 @@ export function Viewer() {
         controller={true}
         layers={layers}
         style={{ background: "#1a1a2e" }}
+        onHover={onHover}
       />
 
       {/* Scale bar and info overlay */}
@@ -137,6 +197,31 @@ export function Viewer() {
             }}
           >
             {vmin.toFixed(0)}
+          </div>
+        </div>
+      )}
+
+      {/* Hover tooltip */}
+      {hoverInfo && (
+        <div
+          style={{
+            position: "absolute",
+            left: hoverInfo.x + 10,
+            top: hoverInfo.y + 10,
+            background: "rgba(0, 0, 0, 0.8)",
+            color: "white",
+            padding: "6px 10px",
+            borderRadius: "4px",
+            fontSize: "12px",
+            pointerEvents: "none",
+            whiteSpace: "nowrap",
+          }}
+        >
+          <div>
+            Value: {hoverInfo.value !== null ? hoverInfo.value.toFixed(2) : "N/A"}
+          </div>
+          <div style={{ opacity: 0.7, fontSize: "10px" }}>
+            Grid: ({hoverInfo.gridX}, {hoverInfo.gridY})
           </div>
         </div>
       )}
