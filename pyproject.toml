@@ -7,7 +7,7 @@ name = "ismip6-helper"
 version = "0.1.0"
 description = "Helper utilities for loading ISMIP6 outputs"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.12"
 authors = [
     { name = "Thomas Teisberg" },
 ]
@@ -17,10 +17,11 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Atmospheric Science",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.12",
 ]
 
 dependencies = [
+    "coiled>=1.129.3",
     "cftime>=1.6.5",
     "dask>=2025.11.0",
     "fsspec>=2025.9.0",
@@ -28,19 +29,25 @@ dependencies = [
     "h5netcdf>=1.7.3",
     "holoviews>=1.19.0",
     "hvplot>=0.10.0",
+    "icechunk>=1.1.13",
     "ipywidgets>=8.1.0",
     "jupyter>=1.1.0",
     "jupyter-bokeh>=4.0.5",
     "matplotlib>=3.10.7",
     "netcdf4>=1.7.0",
     "numpy>=2.3.4",
+    "obstore>=0.8.2",
     "pandas>=2.3.3",
     "panel>=1.5.4",
     "pyarrow>=22.0.0",
     "pyproj>=3.7.0",
     "pyyaml>=6.0.0",
     "scipy>=1.16.2",
+    "virtualizarr>=2.2.1",
     "xarray>=2025.10.1",
+    "lithops[gcp]>=3.6.2",
+    "kerchunk>=0.2.9",
+    "google-cloud>=0.34.0",
 ]
 
 [project.optional-dependencies]
@@ -49,6 +56,7 @@ dev = [
     "pytest-cov>=4.0.0",
     "ruff>=0.1.0",
 ]
+
 
 [tool.hatch.build.targets.wheel]
 packages = ["ismip6_helper", "ismip6_comparison_app"]
