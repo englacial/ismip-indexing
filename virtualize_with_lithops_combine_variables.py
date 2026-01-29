@@ -99,9 +99,10 @@ def batch_virt_func(batch: Tuple[Tuple[str], List[Dict[str, Union[str, int]]]]) 
         }
 
 
-def batch_write_func(batch: Tuple[Tuple[str], List[Dict[str, Union[str, int]]]], vds: xr.Dataset, repo: icechunk.Repository, local_storage: bool = False, max_retries: int = 20) -> Dict[str, Any]:
+def batch_write_func(batch: Tuple[Tuple[str], List[Dict[str, Union[str, int]]]], vds: xr.Dataset, repo: icechunk.Repository, local_storage: bool = False, max_retries: int = 50) -> Dict[str, Any]:
     """Wrap writing to icechunk in error handling. Retries with fresh sessions on stale parent errors."""
     import time as _time
+    import random as _random
     path = batch['path']
     commit_msg = f"Added {path}"
     last_error = None
@@ -114,6 +115,8 @@ def batch_write_func(batch: Tuple[Tuple[str], List[Dict[str, Union[str, int]]]],
                 rebase_with=icechunk.BasicConflictSolver(),
                 rebase_tries=5,
             )
+            if attempt > 0:
+                print(f"    {path}: succeeded on attempt {attempt + 1}")
             return {
                 'success': True,
                 'batch': batch,
@@ -124,7 +127,9 @@ def batch_write_func(batch: Tuple[Tuple[str], List[Dict[str, Union[str, int]]]],
         except Exception as e:
             last_error = e
             if "expected parent" in str(e) or "Rebase failed" in str(e):
-                _time.sleep(0.1 * (attempt + 1))
+                # Exponential backoff with jitter: 0.2s, 0.4s, 0.8s, ... capped at 10s
+                delay = min(0.2 * (2 ** attempt), 10.0) + _random.uniform(0, 0.5)
+                _time.sleep(delay)
                 continue
             # Non-retryable error
             return {
