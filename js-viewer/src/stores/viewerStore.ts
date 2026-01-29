@@ -10,7 +10,7 @@ registerCodecs();
 // Use proxy in development to avoid CORS issues
 const ICECHUNK_URL = import.meta.env.DEV
   ? "/gcs-proxy/ismip6-icechunk/12-07-2025/"
-  : "https://storage.googleapis.com/ismip6-icechunk/12-07-2025/";
+  : "https://ismip6-icechunk.s3.us-west-2.amazonaws.com/combined-variables-v3/";
 
 // Panel represents a single visualization panel
 export interface Panel {
