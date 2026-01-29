@@ -124,9 +124,17 @@ def batch_write_func(batch: Tuple[Tuple[str], List[Dict[str, Union[str, int]]]],
                 'commit_id': commit_id,
                 'commit_msg': commit_msg,
             }
-        except Exception as e:
+        except BaseException as e:
             last_error = e
-            if "expected parent" in str(e) or "Rebase failed" in str(e):
+            err_str = str(e)
+            retryable = (
+                "expected parent" in err_str
+                or "Rebase failed" in err_str
+                or "dispatch failure" in err_str
+                or "Timeout" in err_str
+                or "PanicException" in type(e).__name__
+            )
+            if retryable:
                 # Exponential backoff with jitter: 0.2s, 0.4s, 0.8s, ... capped at 10s
                 delay = min(0.2 * (2 ** attempt), 10.0) + _random.uniform(0, 0.5)
                 _time.sleep(delay)
@@ -135,7 +143,7 @@ def batch_write_func(batch: Tuple[Tuple[str], List[Dict[str, Union[str, int]]]],
             return {
                 "success": False,
                 "batch": batch,
-                "error": str(e),
+                "error": err_str,
             }
     # All retries exhausted
     return {
