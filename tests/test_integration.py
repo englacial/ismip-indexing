@@ -94,7 +94,6 @@ class TestIcechunkS3:
 
     def test_write_and_read_group(self, test_prefix):
         import numpy as np
-        import xarray as xr
 
         repo_kwargs = _make_repo_kwargs(test_prefix + "/write-read")
         repo = icechunk.Repository.open_or_create(**repo_kwargs)
@@ -129,7 +128,7 @@ class TestIcechunkS3:
             root[group_name].create_array("values", data=np.ones(5))
             commit_id = session.commit(
                 f"Added {group_name}",
-                rebase_with=icechunk.ConflictDetector(),
+                rebase_with=icechunk.BasicConflictSolver(),
                 rebase_tries=20,
             )
             return group_name, commit_id
@@ -155,7 +154,13 @@ class TestIcechunkS3:
 
 
 class TestLithopsLambda:
-    """Test that Lithops can invoke a function on AWS Lambda."""
+    """Test that Lithops can invoke a function on AWS Lambda.
+
+    NOTE: These tests require a deployed Lithops Lambda runtime.
+    The runtime is built and deployed locally (not in CI) via:
+        uv run lithops runtime build -f Dockerfile.lithops -c lithops_aws.yaml ismip6-icechunk
+    If the runtime is not deployed, these tests will fail.
+    """
 
     def test_hello_function(self, test_prefix):
         """Verify Lithops can run a trivial function on Lambda."""
@@ -165,10 +170,10 @@ class TestLithopsLambda:
             return x * 2
 
         fexec = lithops.FunctionExecutor(config_file="lithops_aws.yaml")
-        future = fexec.call_async(hello, 21)
-        result = fexec.get_result(future)
+        futures = fexec.map(hello, [21])
+        result = fexec.get_result(futures)
         fexec.clean()
-        assert result == 42
+        assert result == [42]
 
     def test_virtualize_single_batch(self, test_prefix):
         """Run the actual virtualization function on Lambda for one small batch."""
@@ -196,7 +201,7 @@ class TestLithopsLambda:
 
         assert len(results) == 1
         r = results[0]
-        assert r["success"] is True
+        assert r["success"] is True, f"Virtualization failed: {r.get('error', 'unknown')}"
         assert r["batch"]["path"] == "ULB_fETISh_32km/ctrl_proj_std"
         vds = r["virtual_dataset"]
         # Should have the variables we requested
@@ -225,7 +230,7 @@ class TestLithopsLambda:
         results = fexec.get_result(futures)
         fexec.clean()
 
-        assert results[0]["success"]
+        assert results[0]["success"], f"Virtualization failed: {results[0].get('error', 'unknown')}"
         vds = results[0]["virtual_dataset"]
 
         # Write to Icechunk on S3
