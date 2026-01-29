@@ -72,7 +72,7 @@ See [Lithops GCP Functions Documentation](https://lithops-cloud.github.io/docs/s
 
 ## Lithops Configuration
 
-The `lithops.yaml` configuration file should reference the service account key:
+The `lithops_gcp.yaml` configuration file should reference the service account key:
 
 ```yaml
 lithops:
@@ -145,8 +145,8 @@ gcp_storage:
 # and then manually populated requirements-lithops.txt with the same versions
 # This could definitely be improved
 # Then build and deploy the runtime (If the deploy succeeds you should be good to go!)
-uv run lithops runtime build -f requirements-lithops.txt ismip6-icechunk -c lithops.yaml 
-uv run lithops runtime deploy ismip6-icechunk -c lithops.yaml
+uv run lithops runtime build -f requirements-lithops.txt ismip6-icechunk -c lithops_gcp.yaml
+uv run lithops runtime deploy ismip6-icechunk -c lithops_gcp.yaml
 ```
 
 ## Running the script

@@ -1,0 +1,43 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [assigned, opened, synchronize, reopened]
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv python install 3.12
+      - run: uv sync --extra dev
+      - run: uv run python -m pytest tests/test_config.py -v -m "not integration"
+
+  integration-tests:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv python install 3.12
+
+      - name: Decrypt AWS credentials
+        env:
+          SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}
+        run: |
+          curl -LO https://github.com/mozilla/sops/releases/download/v3.8.1/sops-v3.8.1.linux.amd64
+          chmod +x sops-v3.8.1.linux.amd64
+          sudo mv sops-v3.8.1.linux.amd64 /usr/local/bin/sops
+          # Decrypt and export each line as env var
+          sops -d .github/encrypted/aws-credentials.enc.env > /tmp/aws-creds.env
+          while IFS= read -r line; do
+            [[ "$line" =~ ^#.*$ || -z "$line" ]] && continue
+            echo "$line" >> "$GITHUB_ENV"
+          done < /tmp/aws-creds.env
+          rm /tmp/aws-creds.env
+
+      - run: uv sync --extra dev
+      - run: uv run python -m pytest tests/test_integration.py -v -m integration --timeout=300
