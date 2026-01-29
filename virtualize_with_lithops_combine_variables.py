@@ -338,6 +338,15 @@ def process_all_files(
             model_prefix = r['batch']['path'].split('/')[0]
             by_model[model_prefix].append(r)
 
+        # Pre-create all model groups in a single commit so parallel writers
+        # don't conflict on root group metadata
+        print(f'Pre-creating {len(by_model)} model groups...')
+        session = repo.writable_session("main")
+        store = session.store
+        root = zarr.open(store, mode="a")
+        for model_prefix in by_model:
+            root.require_group(model_prefix)
+        session.commit("Pre-create model groups for parallel writes")
         print(f'Writing to icechunk: {len(by_model)} models in parallel, '
               f'experiments sequential within each model')
 

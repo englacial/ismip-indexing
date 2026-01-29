@@ -112,33 +112,83 @@ class TestIcechunkS3:
         assert "test_group" in root2
         assert list(root2["test_group"]["data"][:]) == list(range(10))
 
-    def test_sequential_writes_with_rebase(self, test_prefix):
-        """Test that two sequential commits to disjoint groups both succeed.
+    def test_parallel_writes_grouped_by_model(self, test_prefix):
+        """Test the production write strategy: models in parallel, experiments sequential.
 
-        NOTE: Truly concurrent writes to the same icechunk repo can fail with
-        RebaseFailedError when both sessions modify the root group structure.
-        BasicConflictSolver cannot resolve structural group conflicts.
-        The production pipeline handles this via retries and the "skip existing
-        groups" logic on re-runs.
+        This mirrors the actual pipeline where e.g. AWI_PISM1 and NCAR_CISM
+        write concurrently, but experiments within each model (exp01, exp02, ...)
+        are written sequentially to avoid icechunk rebase conflicts on shared
+        parent group nodes.
         """
         import numpy as np
+        from collections import defaultdict
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        repo_kwargs = _make_repo_kwargs(test_prefix + "/sequential")
+        repo_kwargs = _make_repo_kwargs(test_prefix + "/parallel-by-model")
         repo = icechunk.Repository.open_or_create(**repo_kwargs)
 
-        for group_name in ["group_a", "group_b"]:
-            session = repo.writable_session("main")
-            store = session.store
-            root = zarr.open(store, mode="a")
-            root.create_group(group_name)
-            root[group_name].create_array("values", data=np.ones(5))
-            session.commit(f"Added {group_name}")
+        # Simulate two models, each with multiple experiments
+        batches = [
+            {"model": "AWI_PISM1", "experiment": "exp01"},
+            {"model": "AWI_PISM1", "experiment": "exp02"},
+            {"model": "AWI_PISM1", "experiment": "exp03"},
+            {"model": "NCAR_CISM", "experiment": "exp01"},
+            {"model": "NCAR_CISM", "experiment": "exp02"},
+            {"model": "NCAR_CISM", "experiment": "exp03"},
+        ]
 
-        # Verify both groups exist
+        # Group by model
+        by_model = defaultdict(list)
+        for b in batches:
+            by_model[b["model"]].append(b)
+
+        # Pre-create all model groups in one commit to avoid root conflicts
+        session = repo.writable_session("main")
+        store = session.store
+        root = zarr.open(store, mode="a")
+        for model_name in by_model:
+            root.require_group(model_name)
+        session.commit("Pre-create model groups")
+
+        def write_model_group(model_batches):
+            """Write all experiments for one model sequentially."""
+            results = []
+            for b in model_batches:
+                path = f"{b['model']}/{b['experiment']}"
+                session = repo.writable_session("main")
+                store = session.store
+                root = zarr.open(store, mode="a")
+                grp = root.require_group(b["model"])
+                grp.create_group(b["experiment"])
+                grp[b["experiment"]].create_array("values", data=np.ones(5))
+                commit_id = session.commit(
+                    f"Added {path}",
+                    rebase_with=icechunk.BasicConflictSolver(),
+                    rebase_tries=20,
+                )
+                results.append({"path": path, "commit_id": commit_id})
+            return results
+
+        # Run models in parallel
+        all_results = []
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = {
+                pool.submit(write_model_group, model_batches): model
+                for model, model_batches in by_model.items()
+            }
+            for future in as_completed(futures):
+                all_results.extend(future.result())
+
+        assert len(all_results) == 6
+
+        # Verify all groups exist
         session = repo.readonly_session(branch="main")
         root = zarr.open(session.store, mode="r")
-        assert "group_a" in root
-        assert "group_b" in root
+        assert "AWI_PISM1" in root
+        assert "NCAR_CISM" in root
+        for exp in ["exp01", "exp02", "exp03"]:
+            assert exp in root["AWI_PISM1"], f"Missing AWI_PISM1/{exp}"
+            assert exp in root["NCAR_CISM"], f"Missing NCAR_CISM/{exp}"
 
 
 class TestLithopsLambda:
