@@ -1,0 +1,22 @@
+FROM public.ecr.aws/lambda/python:3.12
+
+# Install system dependencies needed by native packages
+RUN dnf install -y gcc gcc-c++ make && dnf clean all
+
+# Copy and install Python dependencies
+COPY requirements-lithops.txt ${LAMBDA_TASK_ROOT}/
+RUN pip install --no-cache-dir -r ${LAMBDA_TASK_ROOT}/requirements-lithops.txt
+
+# Copy the ismip6_helper module
+COPY ismip6_helper/ ${LAMBDA_TASK_ROOT}/ismip6_helper/
+COPY pyproject.toml ${LAMBDA_TASK_ROOT}/
+COPY README.md ${LAMBDA_TASK_ROOT}/
+RUN pip install --no-cache-dir -e ${LAMBDA_TASK_ROOT}
+
+# Lithops creates lithops_lambda.zip (containing the lithops package and
+# entry_point.py) in the build context before running docker build.
+# We unpack it into LAMBDA_TASK_ROOT so the handler is importable.
+COPY lithops_lambda.zip ${LAMBDA_TASK_ROOT}/
+RUN cd ${LAMBDA_TASK_ROOT} && python -c "import zipfile; zipfile.ZipFile('lithops_lambda.zip').extractall('.')" && rm lithops_lambda.zip
+
+CMD ["entry_point.lambda_handler"]

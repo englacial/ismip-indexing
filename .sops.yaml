@@ -1,0 +1,10 @@
+# SOPS configuration for encrypting secrets using age
+# Uses the same age key as the englacial/xopr repository
+#
+# To encrypt:   sops -e -i .github/encrypted/aws-credentials.enc.env
+# To decrypt:   sops -d .github/encrypted/aws-credentials.enc.env
+# To edit:      sops .github/encrypted/aws-credentials.enc.env
+
+creation_rules:
+  - path_regex: \.enc\.(json|yaml|env)$
+    age: age1chg8hcjuq4fecp95k05kp5z7w8t3pgj9v5vy53584mzm3rthjc6qnf69q5

@@ -159,7 +159,7 @@ def process_all_files():
     print(f"Step 2/3 Complete: Created {len(batches)} batches")
 
     # Initialize Lithops executor
-    fexec = lithops.FunctionExecutor(config_file='lithops.yaml')
+    fexec = lithops.FunctionExecutor(config_file='lithops_gcp.yaml')
 
     # Step 3: Process each batch sequentially
     print("\nStep 3/3: Processing batches...")
