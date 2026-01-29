@@ -9,7 +9,7 @@ aws:
 aws_lambda:
     execution_role: arn:aws:iam::429435741471:role/lithops-ismip6-executor
     runtime_memory: 2048
-    runtime_timeout: 300
+    runtime_timeout: 500
     runtime: ismip6-icechunk
     architecture: x86_64
 
