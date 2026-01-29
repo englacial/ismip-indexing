@@ -326,21 +326,40 @@ def process_all_files(
         print(f"  FAIL: {get_id_from_batch(r['batch'])}: {r.get('error', '')[:200]}")
 
     # Step 4: Write virtual datasets to icechunk
+    # Group by model prefix (e.g. "AWI_PISM1") so experiments within the same
+    # model are written sequentially, avoiding icechunk rebase conflicts on
+    # shared parent group nodes. Different models run in parallel.
     writing_results = []
     if concurrent_writes:
-        print(f'Writing to icechunk concurrently (max_workers=8)')
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            futures = {
-                pool.submit(batch_write_func, r['batch'], r['virtual_dataset'], repo, local_storage): r
-                for r in successful_results
-            }
-            for future in as_completed(futures):
-                res = future.result()
-                writing_results.append(res)
+        # Group successful results by model prefix
+        from collections import defaultdict
+        by_model = defaultdict(list)
+        for r in successful_results:
+            model_prefix = r['batch']['path'].split('/')[0]
+            by_model[model_prefix].append(r)
+
+        print(f'Writing to icechunk: {len(by_model)} models in parallel, '
+              f'experiments sequential within each model')
+
+        def write_model_group(model_results):
+            """Write all experiments for one model sequentially."""
+            results = []
+            for r in model_results:
+                res = batch_write_func(r['batch'], r['virtual_dataset'], repo, local_storage)
+                results.append(res)
                 status = 'OK' if res.get('success') else 'FAIL'
                 print(f"  [{status}] {res['batch']['path']}")
                 if not res.get('success') and res.get('error'):
                     print(f"    Error: {res['error'][:200]}")
+            return results
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = {
+                pool.submit(write_model_group, model_results): model_prefix
+                for model_prefix, model_results in by_model.items()
+            }
+            for future in as_completed(futures):
+                writing_results.extend(future.result())
     else:
         print('Writing to icechunk sequentially')
         for r in successful_results:
