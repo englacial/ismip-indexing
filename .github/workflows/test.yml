@@ -42,4 +42,4 @@ jobs:
           rm /tmp/aws-creds.env
 
       - run: uv sync --extra dev
-      - run: uv run python -m pytest tests/test_integration.py -v -m integration
+      - run: uv run python -m pytest tests/test_integration.py -v -s -W ignore::SyntaxWarning -m integration
