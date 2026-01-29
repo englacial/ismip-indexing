@@ -99,33 +99,45 @@ def batch_virt_func(batch: Tuple[Tuple[str], List[Dict[str, Union[str, int]]]]) 
         }
 
 
-def batch_write_func(batch: Tuple[Tuple[str], List[Dict[str, Union[str, int]]]], vds: xr.Dataset, repo: icechunk.Repository, local_storage: bool = False) -> Dict[str, Any]:
-    """Wrap writing to icechunk in error handling. Uses rebase for concurrent write safety."""
-    try:
-        session = repo.writable_session("main")
-        path = batch['path']
-
-        vds.vz.to_icechunk(session.store, group=path)
-        commit_msg = f"Added {path}"
-        commit_id = session.commit(
-            commit_msg,
-            rebase_with=icechunk.BasicConflictSolver(),
-            rebase_tries=20,
-        )
-        return {
-            'success': True,
-            'batch': batch,
-            'virtual_dataset': vds,
-            'commit_id': commit_id,
-            'commit_msg': commit_msg,
-        }
-
-    except Exception as e:
-        return {
-            "success": False,
-            "batch": batch,
-            "error": str(e),
-        }
+def batch_write_func(batch: Tuple[Tuple[str], List[Dict[str, Union[str, int]]]], vds: xr.Dataset, repo: icechunk.Repository, local_storage: bool = False, max_retries: int = 20) -> Dict[str, Any]:
+    """Wrap writing to icechunk in error handling. Retries with fresh sessions on stale parent errors."""
+    import time as _time
+    path = batch['path']
+    commit_msg = f"Added {path}"
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            session = repo.writable_session("main")
+            vds.vz.to_icechunk(session.store, group=path)
+            commit_id = session.commit(
+                commit_msg,
+                rebase_with=icechunk.BasicConflictSolver(),
+                rebase_tries=5,
+            )
+            return {
+                'success': True,
+                'batch': batch,
+                'virtual_dataset': vds,
+                'commit_id': commit_id,
+                'commit_msg': commit_msg,
+            }
+        except Exception as e:
+            last_error = e
+            if "expected parent" in str(e) or "Rebase failed" in str(e):
+                _time.sleep(0.1 * (attempt + 1))
+                continue
+            # Non-retryable error
+            return {
+                "success": False,
+                "batch": batch,
+                "error": str(e),
+            }
+    # All retries exhausted
+    return {
+        "success": False,
+        "batch": batch,
+        "error": f"Failed after {max_retries} retries: {last_error}",
+    }
 
 
 def get_repo_kwargs(local_storage: bool = False, cloud_backend: str = "aws") -> dict:
