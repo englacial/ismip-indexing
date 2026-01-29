@@ -22,6 +22,19 @@ BUCKET = "ismip6-icechunk"
 REGION = "us-west-2"
 
 
+def _print_lambda_cost(futures, test_name: str):
+    """Print Lambda cost estimate to test output for monitoring."""
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+    from virtualize_with_lithops_combine_variables import compute_lambda_cost
+    stats = compute_lambda_cost(futures)
+    print(f"\n--- Lambda cost for {test_name} ---")
+    print(f"  Invocations: {stats['num_invocations']}")
+    print(f"  Total duration: {stats['total_duration_s']}s")
+    print(f"  GB-seconds: {stats['total_gb_seconds']}")
+    print(f"  Estimated cost: ${stats['lambda_cost_usd']:.4f}")
+
+
 def _has_aws_credentials():
     """Check if AWS credentials are available via env or default chain."""
     try:
@@ -210,6 +223,7 @@ class TestLithopsLambda:
         fexec = lithops.FunctionExecutor(config_file="lithops_aws.yaml")
         futures = fexec.map(hello, [21])
         result = fexec.get_result(futures)
+        _print_lambda_cost(futures, "test_hello_function")
         fexec.clean()
         assert result == [42]
 
@@ -235,6 +249,7 @@ class TestLithopsLambda:
         fexec = lithops.FunctionExecutor(config_file="lithops_aws.yaml")
         futures = fexec.map(virt.batch_virt_func, [{"batch": batch}])
         results = fexec.get_result(futures)
+        _print_lambda_cost(futures, "test_virtualize_single_batch")
         fexec.clean()
 
         assert len(results) == 1
@@ -266,6 +281,7 @@ class TestLithopsLambda:
         fexec = lithops.FunctionExecutor(config_file="lithops_aws.yaml")
         futures = fexec.map(virt.batch_virt_func, [{"batch": batch}])
         results = fexec.get_result(futures)
+        _print_lambda_cost(futures, "test_virtualize_and_write_to_icechunk")
         fexec.clean()
 
         assert results[0]["success"], f"Virtualization failed: {results[0].get('error', 'unknown')}"
