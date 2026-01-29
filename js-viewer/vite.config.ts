@@ -4,7 +4,7 @@ import path from "path";
 
 export default defineConfig({
   plugins: [react()],
-  base: "/viewer/",
+  base: "/static/models/",
   build: {
     outDir: "dist",
     sourcemap: true,
