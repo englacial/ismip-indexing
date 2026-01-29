@@ -1,5 +1,6 @@
 import argparse
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, Future
+import threading
 
 import lithops
 import icechunk
@@ -99,52 +100,107 @@ def batch_virt_func(batch: Tuple[Tuple[str], List[Dict[str, Union[str, int]]]]) 
         }
 
 
+def _single_write_attempt(repo, vds, path, commit_msg):
+    """Execute a single write+commit attempt. Runs in a disposable thread so
+    that a Rust-level deadlock (poisoned connection pool) can be detected via
+    timeout rather than hanging the caller forever."""
+    session = repo.writable_session("main")
+    vds.vz.to_icechunk(session.store, group=path)
+    commit_id = session.commit(
+        commit_msg,
+        rebase_with=icechunk.BasicConflictSolver(),
+        rebase_tries=5,
+    )
+    return commit_id
+
+
+# Per-attempt timeout: if a single write+commit takes longer than this,
+# assume the icechunk Rust runtime is deadlocked (poisoned connection pool).
+WRITE_ATTEMPT_TIMEOUT_S = 120
+
+
 def batch_write_func(batch: Tuple[Tuple[str], List[Dict[str, Union[str, int]]]], vds: xr.Dataset, repo: icechunk.Repository, local_storage: bool = False, max_retries: int = 50) -> Dict[str, Any]:
-    """Wrap writing to icechunk in error handling. Retries with fresh sessions on stale parent errors."""
+    """Wrap writing to icechunk in error handling. Retries with fresh sessions on stale parent errors.
+
+    Each attempt runs in a separate thread with a timeout to detect Rust-level
+    deadlocks caused by connection pool poisoning (icechunk issue #1586).
+    """
     import time as _time
     import random as _random
     path = batch['path']
     commit_msg = f"Added {path}"
     last_error = None
     for attempt in range(max_retries):
-        try:
-            session = repo.writable_session("main")
-            vds.vz.to_icechunk(session.store, group=path)
-            commit_id = session.commit(
-                commit_msg,
-                rebase_with=icechunk.BasicConflictSolver(),
-                rebase_tries=5,
+        # Run the write attempt in a disposable thread with a timeout.
+        # If the icechunk Rust runtime is deadlocked, the thread will hang
+        # but we won't block — we'll detect it via timeout and report it.
+        result_holder = {}
+        error_holder = {}
+
+        def _attempt():
+            try:
+                result_holder['commit_id'] = _single_write_attempt(
+                    repo, vds, path, commit_msg
+                )
+            except BaseException as e:
+                error_holder['error'] = e
+
+        t = threading.Thread(target=_attempt, daemon=True)
+        t.start()
+        t.join(timeout=WRITE_ATTEMPT_TIMEOUT_S)
+
+        if t.is_alive():
+            # Thread is stuck — likely a poisoned Rust mutex / deadlock.
+            # We can't kill the thread, but we can stop retrying and report.
+            msg = (
+                f"DEADLOCK DETECTED: write attempt for {path} did not complete "
+                f"within {WRITE_ATTEMPT_TIMEOUT_S}s (attempt {attempt + 1}). "
+                f"This is likely caused by a poisoned icechunk connection pool "
+                f"(see https://github.com/earth-mover/icechunk/issues/1586). "
+                f"The Rust runtime is unrecoverable — remaining batches in this "
+                f"process will also fail. Restart the pipeline to resume."
             )
+            print(f"    {path}: {msg}")
+            return {
+                "success": False,
+                "batch": batch,
+                "error": msg,
+                "deadlock": True,
+            }
+
+        if 'commit_id' in result_holder:
             if attempt > 0:
                 print(f"    {path}: succeeded on attempt {attempt + 1}")
             return {
                 'success': True,
                 'batch': batch,
                 'virtual_dataset': vds,
-                'commit_id': commit_id,
+                'commit_id': result_holder['commit_id'],
                 'commit_msg': commit_msg,
             }
-        except BaseException as e:
-            last_error = e
-            err_str = str(e)
-            retryable = (
-                "expected parent" in err_str
-                or "Rebase failed" in err_str
-                or "dispatch failure" in err_str
-                or "Timeout" in err_str
-                or "PanicException" in type(e).__name__
-            )
-            if retryable:
-                # Exponential backoff with jitter: 0.2s, 0.4s, 0.8s, ... capped at 10s
-                delay = min(0.2 * (2 ** attempt), 10.0) + _random.uniform(0, 0.5)
-                _time.sleep(delay)
-                continue
-            # Non-retryable error
-            return {
-                "success": False,
-                "batch": batch,
-                "error": err_str,
-            }
+
+        # An exception was raised
+        e = error_holder.get('error')
+        last_error = e
+        err_str = str(e)
+        retryable = (
+            "expected parent" in err_str
+            or "Rebase failed" in err_str
+            or "dispatch failure" in err_str
+            or "Timeout" in err_str
+            or "PanicException" in type(e).__name__
+        )
+        if retryable:
+            # Exponential backoff with jitter: 0.2s, 0.4s, 0.8s, ... capped at 10s
+            delay = min(0.2 * (2 ** attempt), 10.0) + _random.uniform(0, 0.5)
+            _time.sleep(delay)
+            continue
+        # Non-retryable error
+        return {
+            "success": False,
+            "batch": batch,
+            "error": err_str,
+        }
     # All retries exhausted
     return {
         "success": False,
@@ -375,16 +431,30 @@ def process_all_files(
         print(f'Writing to icechunk: {len(by_model)} models in parallel, '
               f'experiments sequential within each model')
 
+        # Shared flag: set when any thread detects a deadlock, signaling
+        # all other threads to stop submitting new write attempts.
+        _deadlock_detected = threading.Event()
+
         def write_model_group(model_results):
             """Write all experiments for one model sequentially."""
             results = []
             for r in model_results:
+                if _deadlock_detected.is_set():
+                    results.append({
+                        "success": False,
+                        "batch": r['batch'],
+                        "error": "Skipped: deadlock detected in another thread",
+                    })
+                    print(f"  [SKIP] {r['batch']['path']} (deadlock in another thread)")
+                    continue
                 res = batch_write_func(r['batch'], r['virtual_dataset'], repo, local_storage)
                 results.append(res)
                 status = 'OK' if res.get('success') else 'FAIL'
                 print(f"  [{status}] {res['batch']['path']}")
                 if not res.get('success') and res.get('error'):
                     print(f"    Error: {res['error'][:200]}")
+                if res.get('deadlock'):
+                    _deadlock_detected.set()
             return results
 
         with ThreadPoolExecutor(max_workers=8) as pool:
@@ -394,6 +464,13 @@ def process_all_files(
             }
             for future in as_completed(futures):
                 writing_results.extend(future.result())
+
+        if _deadlock_detected.is_set():
+            print("\n*** DEADLOCK DETECTED ***")
+            print("The icechunk Rust runtime entered an unrecoverable state.")
+            print("See https://github.com/earth-mover/icechunk/issues/1586")
+            print("Successfully written batches are safe. Re-run the pipeline")
+            print("to resume — it will skip already-written experiments.")
     else:
         print('Writing to icechunk sequentially')
         for r in successful_results:
