@@ -318,7 +318,7 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
 
     try {
       // Build the path to the variable array
-      const arrayPath = `${panel.selectedModel}/${panel.selectedExperiment}/${selectedVariable}/${selectedVariable}`;
+      const arrayPath = `${panel.selectedModel}/${panel.selectedExperiment}/${selectedVariable}`;
       console.log(`[Panel ${panelId}] Loading: ${arrayPath}`);
 
       // Get a store resolved to this path
