@@ -1,4 +1,4 @@
-import { useMemo, useCallback } from "react";
+import { useMemo, useCallback, useEffect, useRef, useState } from "react";
 import { DeckGL } from "@deck.gl/react";
 import { OrthographicView, PickingInfo } from "@deck.gl/core";
 import { BitmapLayer } from "@deck.gl/layers";
@@ -60,35 +60,43 @@ export function Panel({ panel, isActive, canRemove }: PanelProps) {
     ? experiments.get(selectedModel) || []
     : [];
 
-  const imageData = useMemo(() => {
-    if (!currentData || !dataShape) return null;
+  // Build an ImageBitmap from the data. ImageBitmap is immutable and
+  // GPU-transferable, so deck.gl can upload it as a texture without
+  // racing against canvas mutations or garbage collection.
+  const [bitmap, setBitmap] = useState<ImageBitmap | null>(null);
+  const bitmapGenRef = useRef(0);
 
+  useEffect(() => {
+    if (!currentData || !dataShape) {
+      setBitmap(null);
+      return;
+    }
+
+    const gen = ++bitmapGenRef.current;
     const [height, width] = dataShape;
     const rgba = dataToRGBA(currentData, width, height, vmin, vmax, colormap);
 
-    // Create ImageData for BitmapLayer
-    const canvas = document.createElement("canvas");
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return null;
+    const imgData = new ImageData(new Uint8ClampedArray(rgba.buffer, rgba.byteOffset, rgba.byteLength), width, height);
 
-    const imgData = ctx.createImageData(width, height);
-    imgData.data.set(rgba);
-    ctx.putImageData(imgData, 0, 0);
+    createImageBitmap(imgData, { imageOrientation: "flipY" }).then(
+      (bmp) => {
+        // Only apply if this is still the latest generation
+        if (bitmapGenRef.current === gen) {
+          setBitmap((prev) => {
+            prev?.close(); // release old GPU resource
+            return bmp;
+          });
+        } else {
+          bmp.close(); // stale, discard
+        }
+      },
+      (err) => console.error("Failed to create ImageBitmap:", err)
+    );
 
-    // Flip vertically for proper orientation
-    const flippedCanvas = document.createElement("canvas");
-    flippedCanvas.width = width;
-    flippedCanvas.height = height;
-    const flippedCtx = flippedCanvas.getContext("2d");
-    if (!flippedCtx) return null;
-
-    flippedCtx.translate(0, height);
-    flippedCtx.scale(1, -1);
-    flippedCtx.drawImage(canvas, 0, 0);
-
-    return flippedCanvas.toDataURL();
+    return () => {
+      // If the effect re-runs before the promise resolves, the gen
+      // check above will discard the stale bitmap.
+    };
   }, [currentData, dataShape, colormap, vmin, vmax]);
 
   const onHover = useCallback(
@@ -129,17 +137,17 @@ export function Panel({ panel, isActive, canRemove }: PanelProps) {
   }, [hoverGridPosition, panels, getValueAtGridPosition]);
 
   const layers = useMemo(() => {
-    if (!imageData) return [];
+    if (!bitmap) return [];
 
     return [
       new BitmapLayer({
         id: `data-layer-${panel.id}`,
         bounds: [X_MIN, Y_MIN, X_MAX, Y_MAX],
-        image: imageData,
+        image: bitmap,
         pickable: false,
       }),
     ];
-  }, [imageData, panel.id]);
+  }, [bitmap, panel.id]);
 
   const views = new OrthographicView({
     id: "ortho",
