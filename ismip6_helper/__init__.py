@@ -34,6 +34,10 @@ from .time_utils import (
     open_ismip6_dataset,
 )
 
+from .rechunk_virtual import (
+    rechunk_contiguous_time_axis,
+)
+
 __version__ = "0.1.0"
 
 __all__ = [
@@ -51,4 +55,6 @@ __all__ = [
     # Time utils
     "fix_time_encoding",
     "open_ismip6_dataset",
+    # Rechunking
+    "rechunk_contiguous_time_axis",
 ]
