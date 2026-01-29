@@ -50,7 +50,7 @@ def virtualize_and_combine_batch(urls: List[str], parser: Union[HDFParser, NetCD
     # a single virtual dataset
 
     # create virtual datasets (can we speed this up in parallel if we group them? Not a prio right now)
-    loadable_variables = ['time', 'x', 'y', 'lat', 'lon', 'latitude', 'longitude', 'nv4', 'lon_bnds', 'lat_bnds']
+    loadable_variables = ['x', 'y', 'lat', 'lon', 'latitude', 'longitude', 'nv4', 'lon_bnds', 'lat_bnds']
 
     # virtualize and append all needed metadata (for now just the variable)
     vdatasets = []
@@ -109,7 +109,7 @@ def batch_write_func(batch: Tuple[Tuple[str], List[Dict[str, Union[str, int]]]],
         commit_msg = f"Added {path}"
         commit_id = session.commit(
             commit_msg,
-            rebase_with=icechunk.ConflictDetector(),
+            rebase_with=icechunk.BasicConflictSolver(),
             rebase_tries=20,
         )
         return {

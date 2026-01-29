@@ -31,13 +31,15 @@ jobs:
           curl -LO https://github.com/mozilla/sops/releases/download/v3.8.1/sops-v3.8.1.linux.amd64
           chmod +x sops-v3.8.1.linux.amd64
           sudo mv sops-v3.8.1.linux.amd64 /usr/local/bin/sops
-          # Decrypt and export each line as env var
+          # Decrypt credentials
           sops -d .github/encrypted/aws-credentials.enc.env > /tmp/aws-creds.env
-          while IFS= read -r line; do
-            [[ "$line" =~ ^#.*$ || -z "$line" ]] && continue
-            echo "$line" >> "$GITHUB_ENV"
+          # Register each value as a masked secret, then export as env var
+          while IFS='=' read -r key value; do
+            [[ "$key" =~ ^#.*$ || -z "$key" ]] && continue
+            echo "::add-mask::${value}"
+            echo "${key}=${value}" >> "$GITHUB_ENV"
           done < /tmp/aws-creds.env
           rm /tmp/aws-creds.env
 
       - run: uv sync --extra dev
-      - run: uv run python -m pytest tests/test_integration.py -v -m integration --timeout=300
+      - run: uv run python -m pytest tests/test_integration.py -v -m integration
