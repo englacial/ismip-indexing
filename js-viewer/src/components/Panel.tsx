@@ -4,6 +4,7 @@ import { OrthographicView, PickingInfo } from "@deck.gl/core";
 import { BitmapLayer } from "@deck.gl/layers";
 import { useViewerStore, Panel as PanelType } from "../stores/viewerStore";
 import { dataToRGBA } from "../utils/colormap";
+import { formatValue } from "../utils/format";
 
 interface PanelProps {
   panel: PanelType;
@@ -380,7 +381,7 @@ export function Panel({ panel, isActive, canRemove }: PanelProps) {
                   {hv.model}/{hv.experiment}:
                 </span>
                 <span>
-                  {hv.value !== null ? hv.value.toFixed(2) : "N/A"}
+                  {hv.value !== null ? formatValue(hv.value) : "N/A"}
                 </span>
               </div>
             ))}
