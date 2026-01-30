@@ -3,6 +3,7 @@
  *
  * Usage:
  *   ```{ismip6-viewer}
+ *   :store_url: https://example.com/my-icechunk-store/
  *   :model: DOE_MALI
  *   :experiment: ctrl_proj_std
  *   :variable: lithk
@@ -12,9 +13,17 @@
  *
  * Multi-panel:
  *   ```{ismip6-viewer}
+ *   :store_url: https://example.com/my-icechunk-store/
  *   :panels: [{"model": "DOE_MALI", "experiment": "exp05"}, {"model": "JPL1_ISSM", "experiment": "exp05"}]
  *   :variable: lithk
  *   :controls: time
+ *   ```
+ *
+ * Pinned to a specific store version:
+ *   ```{ismip6-viewer}
+ *   :store_url: https://example.com/my-icechunk-store/
+ *   :store_ref: 0KJ35GFRGPGJ2DYWYWNG
+ *   :variable: lithk
  *   ```
  *
  * Register in myst.yml:
@@ -72,7 +81,12 @@ const ismip6ViewerDirective = {
     },
     store_url: {
       type: String,
-      doc: 'Override icechunk store URL (for non-ISMIP6 stores)',
+      doc: 'icechunk store URL (required)',
+      required: true,
+    },
+    store_ref: {
+      type: String,
+      doc: 'Store version: branch name, tag, or snapshot ID (default: "main")',
     },
     group_path: {
       type: String,
@@ -127,6 +141,7 @@ const ismip6ViewerDirective = {
     if (options.vmax !== undefined) params.set('vmax', options.vmax.toString());
     if (options.controls) params.set('controls', options.controls);
     if (options.store_url) params.set('store_url', options.store_url);
+    if (options.store_ref) params.set('store_ref', options.store_ref);
     if (options.group_path) params.set('group_path', options.group_path);
     if (options.grid_width !== undefined) params.set('grid_width', options.grid_width.toString());
     if (options.grid_height !== undefined) params.set('grid_height', options.grid_height.toString());

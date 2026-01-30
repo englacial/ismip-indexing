@@ -27,8 +27,10 @@ export interface EmbedConfig {
   controls?: "all" | "time" | "none";
   /** Auto-load data on init */
   autoload?: boolean;
-  /** Override icechunk store URL */
+  /** icechunk store URL */
   store_url?: string;
+  /** Store ref: branch name, tag name, or snapshot ID (default: "main") */
+  store_ref?: string;
   /** Override group path within store (e.g., "model/experiment" or just "experiment") */
   group_path?: string;
   /** Grid parameter overrides (fallback if coordinate arrays not found) */
@@ -63,6 +65,7 @@ export function parseUrlParams(): EmbedConfig | null {
   config.vmin = num("vmin");
   config.vmax = num("vmax");
   config.store_url = str("store_url");
+  config.store_ref = str("store_ref");
   config.group_path = str("group_path");
 
   // Grid overrides
