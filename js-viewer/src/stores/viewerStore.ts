@@ -736,12 +736,18 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
       }
     } catch (err) {
       console.error(`[Panel ${panelId}] Failed to load data:`, err);
+      const errMsg = err instanceof Error ? err.message : "Failed to load data";
+      // Friendly message for missing variables
+      const isNotFound = errMsg.includes("Node not found") || errMsg.includes("Missing key");
+      const displayError = isNotFound
+        ? `Variable "${selectedVariable}" not available for ${panel.selectedModel}/${panel.selectedExperiment}`
+        : errMsg;
       set({
         panels: get().panels.map((p) =>
           p.id === panelId
             ? {
                 ...p,
-                error: err instanceof Error ? err.message : "Failed to load data",
+                error: displayError,
                 isLoading: false,
               }
             : p
@@ -772,11 +778,30 @@ function computeAutoRange(get: () => ViewerState) {
     }
   }
 
-  if (allValidValues.length > 0) {
-    allValidValues.sort((a, b) => a - b);
-    const p5 = allValidValues[Math.floor(allValidValues.length * 0.05)];
-    const p95 = allValidValues[Math.floor(allValidValues.length * 0.95)];
-    console.log(`[autoRange] Combined p5=${p5}, p95=${p95} from ${allValidValues.length} values`);
-    useViewerStore.setState({ vmin: p5, vmax: p95 });
+  if (allValidValues.length === 0) {
+    console.log("[autoRange] No valid values found, setting range to 0-1");
+    useViewerStore.setState({ vmin: 0, vmax: 1 });
+    return;
   }
+
+  allValidValues.sort((a, b) => a - b);
+  let p5 = allValidValues[Math.floor(allValidValues.length * 0.05)];
+  let p95 = allValidValues[Math.floor(allValidValues.length * 0.95)];
+
+  // Guard against degenerate range (p5 === p95)
+  if (p5 === p95) {
+    const v = p5;
+    if (v === 0) {
+      p5 = -1;
+      p95 = 1;
+    } else {
+      // Expand by 10% around the single value
+      const margin = Math.abs(v) * 0.1;
+      p5 = v - margin;
+      p95 = v + margin;
+    }
+  }
+
+  console.log(`[autoRange] Combined p5=${p5}, p95=${p95} from ${allValidValues.length} values`);
+  useViewerStore.setState({ vmin: p5, vmax: p95 });
 }
