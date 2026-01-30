@@ -400,8 +400,13 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
           }
         : undefined;
 
+      // Determine store ref: branch, tag, or snapshot ID
+      const storeRef = embedConfig?.store_ref || "main";
+
+      // Open store — if ref looks like a snapshot ID (20-char base32), use it directly
+      const isSnapshotId = /^[0-9A-Z]{20}$/.test(storeRef);
       const store = await IcechunkStore.open(storeUrl, {
-        ref: "main",
+        ...(isSnapshotId ? { snapshot: storeRef } : { ref: storeRef }),
         virtualUrlTransformer,
       });
 
