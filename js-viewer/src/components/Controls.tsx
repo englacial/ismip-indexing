@@ -1,5 +1,6 @@
 import { useViewerStore } from "../stores/viewerStore";
 import { COLORMAP_NAMES } from "../utils/colormap";
+import { formatValue } from "../utils/format";
 
 export function Controls() {
   const {
@@ -268,7 +269,7 @@ export function Controls() {
 
       {/* Current Range Display */}
       <div style={{ fontSize: "12px", color: "#666" }}>
-        Current range: {vmin.toFixed(1)} - {vmax.toFixed(1)}
+        Current range: {formatValue(vmin)} - {formatValue(vmax)}
       </div>
 
       <hr
@@ -289,7 +290,7 @@ export function Controls() {
         </label>
         <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
           <div style={{ fontSize: "11px", width: "40px", textAlign: "right" }}>
-            {vmin.toFixed(0)}
+            {formatValue(vmin)}
           </div>
           <div
             style={{
@@ -299,7 +300,7 @@ export function Controls() {
               borderRadius: "2px",
             }}
           />
-          <div style={{ fontSize: "11px", width: "40px" }}>{vmax.toFixed(0)}</div>
+          <div style={{ fontSize: "11px", width: "40px" }}>{formatValue(vmax)}</div>
         </div>
       </div>
     </div>
