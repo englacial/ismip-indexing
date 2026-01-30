@@ -9,6 +9,8 @@
 --   {{< ismip6-viewer panels='[{"model":"DOE_MALI","experiment":"exp05"},{"model":"JPL1_ISSM","experiment":"exp05"}]' variable="lithk" controls="time" >}}
 --
 -- Options:
+--   store_url   - icechunk store URL (required)
+--   store_ref   - Store version: branch, tag, or snapshot ID (default: main)
 --   model       - Model name (e.g., DOE_MALI)
 --   experiment  - Experiment name (e.g., ctrl_proj_std)
 --   variable    - Variable to display (e.g., lithk)
@@ -27,7 +29,7 @@ local DEFAULT_URL = "https://models.englacial.org/"
 local PARAM_KEYS = {
   "model", "experiment", "variable", "time",
   "colormap", "vmin", "vmax", "panels", "controls",
-  "store_url", "group_path",
+  "store_url", "store_ref", "group_path",
   "grid_width", "grid_height", "cell_size", "x_min", "y_min"
 }
 
