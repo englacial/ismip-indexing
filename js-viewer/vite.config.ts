@@ -23,12 +23,13 @@ export default defineConfig({
       ],
     },
     proxy: {
-      "/gcs-proxy": {
-        target: "https://storage.googleapis.com",
+      // Proxy for icechunk store on S3
+      "/s3-proxy": {
+        target: "https://ismip6-icechunk.s3.us-west-2.amazonaws.com",
         changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/gcs-proxy/, ""),
+        rewrite: (path) => path.replace(/^\/s3-proxy/, ""),
       },
-      // Proxy for virtual chunk data from ismip6 bucket
+      // Proxy for virtual chunk data from ismip6 GCS bucket
       "/ismip6-proxy": {
         target: "https://storage.googleapis.com",
         changeOrigin: true,

@@ -1,0 +1,6 @@
+title: ISMIP6 Viewer
+author: englacial
+version: 0.1.0
+contributes:
+  shortcodes:
+    - ismip6-viewer.lua

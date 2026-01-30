@@ -3,13 +3,56 @@ import { Panel } from "./components/Panel";
 import { Controls } from "./components/Controls";
 import { useViewerStore } from "./stores/viewerStore";
 
+function FloatingTimeSlider() {
+  const { timeIndex, setTimeIndex, panels } = useViewerStore();
+  const maxTimeIndex = Math.max(...panels.map((p) => p.maxTimeIndex), 0);
+
+  if (maxTimeIndex === 0) return null;
+
+  return (
+    <div
+      style={{
+        position: "absolute",
+        bottom: "16px",
+        left: "50%",
+        transform: "translateX(-50%)",
+        zIndex: 1000,
+        background: "rgba(255,255,255,0.95)",
+        padding: "8px 16px",
+        borderRadius: "8px",
+        boxShadow: "0 2px 8px rgba(0,0,0,0.2)",
+        display: "flex",
+        alignItems: "center",
+        gap: "12px",
+        minWidth: "300px",
+      }}
+    >
+      <span style={{ fontSize: "12px", fontWeight: 500, whiteSpace: "nowrap" }}>
+        Time: {timeIndex} / {maxTimeIndex}
+      </span>
+      <input
+        type="range"
+        min={0}
+        max={maxTimeIndex}
+        value={timeIndex}
+        onChange={(e) => setTimeIndex(parseInt(e.target.value, 10))}
+        style={{ flex: 1 }}
+      />
+    </div>
+  );
+}
+
 export default function App() {
-  const { initialize, isInitializing, initError, panels, activePanelId } =
+  const { initialize, isInitializing, initError, panels, activePanelId, embedConfig } =
     useViewerStore();
 
   useEffect(() => {
     initialize();
   }, [initialize]);
+
+  const controlsMode = embedConfig?.controls || "all";
+  const showSidebar = controlsMode === "all";
+  const showFloatingSlider = controlsMode === "time";
 
   // Calculate grid layout based on number of panels
   const getGridStyle = (count: number): React.CSSProperties => {
@@ -33,7 +76,7 @@ export default function App() {
 
   return (
     <div style={{ display: "flex", width: "100%", height: "100%" }}>
-      <Controls />
+      {showSidebar && <Controls />}
       <div style={{ flex: 1, position: "relative" }}>
         {/* Initialization loading */}
         {isInitializing && (
@@ -94,6 +137,9 @@ export default function App() {
             />
           ))}
         </div>
+
+        {/* Floating time slider for embed mode */}
+        {showFloatingSlider && <FloatingTimeSlider />}
       </div>
     </div>
   );
