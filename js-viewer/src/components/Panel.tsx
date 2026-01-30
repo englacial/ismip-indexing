@@ -5,28 +5,6 @@ import { BitmapLayer } from "@deck.gl/layers";
 import { useViewerStore, Panel as PanelType } from "../stores/viewerStore";
 import { dataToRGBA } from "../utils/colormap";
 
-// ISMIP6 Antarctic data grid parameters (EPSG:3031)
-const GRID_WIDTH = 761;
-const GRID_HEIGHT = 761;
-const CELL_SIZE = 8000; // 8km in meters
-
-// Grid extent in EPSG:3031 coordinates
-const X_MIN = -3040000;
-const Y_MIN = -3040000;
-const X_MAX = X_MIN + GRID_WIDTH * CELL_SIZE;
-const Y_MAX = Y_MIN + GRID_HEIGHT * CELL_SIZE;
-
-// Center of the grid
-const CENTER_X = (X_MIN + X_MAX) / 2;
-const CENTER_Y = (Y_MIN + Y_MAX) / 2;
-
-const INITIAL_VIEW_STATE = {
-  target: [CENTER_X, CENTER_Y, 0] as [number, number, number],
-  zoom: -13,
-  minZoom: -16,
-  maxZoom: 0,
-};
-
 interface PanelProps {
   panel: PanelType;
   isActive: boolean;
@@ -52,7 +30,20 @@ export function Panel({ panel, isActive, canRemove }: PanelProps) {
     hoveredPanelId,
     setHoverGridPosition,
     getValueAtGridPosition,
+    gridConfig,
+    fillValue,
   } = useViewerStore();
+
+  // Derive grid geometry from store config
+  const { width: GRID_WIDTH, height: GRID_HEIGHT, cellSize: CELL_SIZE, xMin: X_MIN, yMin: Y_MIN, xMax: X_MAX, yMax: Y_MAX } = gridConfig;
+  const CENTER_X = (X_MIN + X_MAX) / 2;
+  const CENTER_Y = (Y_MIN + Y_MAX) / 2;
+  const INITIAL_VIEW_STATE = useMemo(() => ({
+    target: [CENTER_X, CENTER_Y, 0] as [number, number, number],
+    zoom: -13,
+    minZoom: -16,
+    maxZoom: 0,
+  }), [CENTER_X, CENTER_Y]);
 
   const { currentData, dataShape, selectedModel, selectedExperiment, isLoading, error } = panel;
 
@@ -74,7 +65,7 @@ export function Panel({ panel, isActive, canRemove }: PanelProps) {
 
     const gen = ++bitmapGenRef.current;
     const [height, width] = dataShape;
-    const rgba = dataToRGBA(currentData, width, height, vmin, vmax, colormap);
+    const rgba = dataToRGBA(currentData, width, height, vmin, vmax, colormap, fillValue);
 
     const imgData = new ImageData(new Uint8ClampedArray(rgba.buffer, rgba.byteOffset, rgba.byteLength), width, height);
 
@@ -97,7 +88,7 @@ export function Panel({ panel, isActive, canRemove }: PanelProps) {
       // If the effect re-runs before the promise resolves, the gen
       // check above will discard the stale bitmap.
     };
-  }, [currentData, dataShape, colormap, vmin, vmax]);
+  }, [currentData, dataShape, colormap, vmin, vmax, fillValue]);
 
   const onHover = useCallback(
     (info: PickingInfo) => {
