@@ -2,15 +2,38 @@ import { create } from "zustand";
 import { IcechunkStore } from "icechunk-js";
 import * as zarr from "zarrita";
 import { registerCodecs } from "../utils/codecs";
+import { parseUrlParams, EmbedConfig } from "../utils/urlParams";
 
 // Register numcodecs codecs at module load time
 registerCodecs();
 
-// ISMIP6 icechunk store URL
+// Default ISMIP6 icechunk store URL (S3, combined-variables-v3)
 // Use proxy in development to avoid CORS issues
-const ICECHUNK_URL = import.meta.env.DEV
-  ? "/gcs-proxy/ismip6-icechunk/12-07-2025/"
+const DEFAULT_STORE_URL = import.meta.env.DEV
+  ? "/s3-proxy/combined-variables-v3/"
   : "https://ismip6-icechunk.s3.us-west-2.amazonaws.com/combined-variables-v3/";
+
+// Grid configuration derived from coordinate arrays or URL params
+export interface GridConfig {
+  width: number;
+  height: number;
+  cellSize: number;
+  xMin: number;
+  yMin: number;
+  xMax: number;
+  yMax: number;
+}
+
+// Default grid for ISMIP6 Antarctic (EPSG:3031)
+const DEFAULT_GRID: GridConfig = {
+  width: 761,
+  height: 761,
+  cellSize: 8000,
+  xMin: -3040000,
+  yMin: -3040000,
+  xMax: -3040000 + 761 * 8000,
+  yMax: -3040000 + 761 * 8000,
+};
 
 // Panel represents a single visualization panel
 export interface Panel {
@@ -24,16 +47,36 @@ export interface Panel {
   maxTimeIndex: number;
 }
 
+// Known coordinate/dimension variable names to exclude from data variables
+const COORD_NAMES = new Set([
+  "x", "y", "lat", "lon", "latitude", "longitude",
+  "time", "t", "bnds", "bounds", "time_bnds", "time_bounds",
+  "x_bnds", "y_bnds", "lat_bnds", "lon_bnds",
+  "mapping", "crs", "spatial_ref",
+]);
+
 interface ViewerState {
   // Connection state
   isInitializing: boolean;
   initError: string | null;
   store: IcechunkStore | null;
 
+  // Embed configuration (null = standalone mode)
+  embedConfig: EmbedConfig | null;
+
+  // Grid configuration (derived from store or URL params)
+  gridConfig: GridConfig;
+
   // Available data
   models: string[];
   experiments: Map<string, string[]>;
   variables: string[];
+
+  // Hierarchy depth (how many group levels before arrays)
+  hierarchyDepth: number;
+
+  // Fill value for masking (from zarr metadata or default)
+  fillValue: number | null;
 
   // Panels
   panels: Panel[];
@@ -76,24 +119,6 @@ interface ViewerState {
   loadAllPanels: () => Promise<void>;
 }
 
-// Common ISMIP6 variables (2D gridded)
-const ISMIP6_VARIABLES = [
-  "lithk", // ice thickness
-  "orog", // surface elevation
-  "base", // base elevation
-  "topg", // bedrock elevation
-  "velsurf_mag", // surface velocity magnitude
-  "acabf", // surface mass balance flux
-  "libmassbfgr", // basal mass balance flux grounded
-  "libmassbffl", // basal mass balance flux floating
-  "licalvf", // calving flux
-  "ligroundf", // grounding line flux
-  "sftgif", // grounded ice fraction
-  "sftgrf", // grounded ice area
-  "sftflf", // floating ice fraction
-  "dlithkdt", // ice thickness change rate
-];
-
 let panelIdCounter = 0;
 function generatePanelId(): string {
   return `panel-${++panelIdCounter}`;
@@ -112,21 +137,243 @@ function createEmptyPanel(): Panel {
   };
 }
 
+/**
+ * Walk the store hierarchy to discover structure.
+ * Returns { models, experiments, variables, hierarchyDepth, arrayGroupPath }
+ *
+ * Supports:
+ * - 2-level: model/experiment/variable_arrays  (hierarchyDepth=2)
+ * - 1-level: experiment/variable_arrays         (hierarchyDepth=1)
+ * - 0-level: variable_arrays at root            (hierarchyDepth=0)
+ */
+async function discoverHierarchy(
+  store: IcechunkStore,
+  groupPathOverride?: string,
+): Promise<{
+  models: string[];
+  experiments: Map<string, string[]>;
+  variables: string[];
+  hierarchyDepth: number;
+}> {
+  const basePath = groupPathOverride || "";
+
+  // Check if the base path itself contains arrays (depth 0)
+  const rootChildren = store.listChildren(basePath);
+
+  // Try to open first child as array to determine if these are arrays or groups
+  if (rootChildren.length === 0) {
+    return { models: [], experiments: new Map(), variables: [], hierarchyDepth: 0 };
+  }
+
+  // Test first child: is it a group or an array?
+  const testPath = basePath ? `${basePath}/${rootChildren[0]}` : rootChildren[0];
+  let firstChildIsGroup = false;
+  try {
+    const testChildren = store.listChildren(testPath);
+    // If it has children, it's a group
+    firstChildIsGroup = testChildren.length > 0;
+  } catch {
+    // If listChildren fails, it's likely an array
+    firstChildIsGroup = false;
+  }
+
+  if (!firstChildIsGroup) {
+    // Depth 0: arrays at root/basePath
+    const variables = rootChildren.filter((name) => !COORD_NAMES.has(name.toLowerCase()));
+    return { models: [], experiments: new Map(), variables, hierarchyDepth: 0 };
+  }
+
+  // First level is groups. Check if second level is also groups or arrays.
+  const firstGroup = rootChildren[0];
+  const firstGroupPath = basePath ? `${basePath}/${firstGroup}` : firstGroup;
+  const secondLevelChildren = store.listChildren(firstGroupPath);
+
+  if (secondLevelChildren.length === 0) {
+    return { models: [], experiments: new Map(), variables: [], hierarchyDepth: 1 };
+  }
+
+  const testPath2 = `${firstGroupPath}/${secondLevelChildren[0]}`;
+  let secondChildIsGroup = false;
+  try {
+    const testChildren2 = store.listChildren(testPath2);
+    secondChildIsGroup = testChildren2.length > 0;
+  } catch {
+    secondChildIsGroup = false;
+  }
+
+  if (!secondChildIsGroup) {
+    // Depth 1: one level of groups, then arrays
+    // Treat rootChildren as "experiments" (no model level)
+    const experiments = new Map<string, string[]>();
+    // Discover variables from first group's arrays
+    const variables = secondLevelChildren.filter((name) => !COORD_NAMES.has(name.toLowerCase()));
+    // No model grouping — put all under a single dummy model key
+    experiments.set("_root", rootChildren);
+    return { models: [], experiments, variables, hierarchyDepth: 1 };
+  }
+
+  // Depth 2: model/experiment/arrays (ISMIP6 pattern)
+  const models = rootChildren;
+  const experiments = new Map<string, string[]>();
+  for (const model of models) {
+    const modelPath = basePath ? `${basePath}/${model}` : model;
+    const modelExps = store.listChildren(modelPath);
+    experiments.set(model, modelExps);
+  }
+
+  // Discover variables from first model's first experiment
+  // Filter to only spatial arrays (2D or 3D), excluding 1D time-series
+  const firstModel = models[0];
+  const firstModelExps = experiments.get(firstModel) || [];
+  let variables: string[] = [];
+  if (firstModelExps.length > 0) {
+    const samplePath = basePath
+      ? `${basePath}/${firstModel}/${firstModelExps[0]}`
+      : `${firstModel}/${firstModelExps[0]}`;
+    const arrayNames = store.listChildren(samplePath)
+      .filter((name) => !COORD_NAMES.has(name.toLowerCase()));
+
+    // Check dimensionality of each candidate variable
+    for (const name of arrayNames) {
+      try {
+        const arrStore = store.resolve(`${samplePath}/${name}`);
+        const arr = await zarr.open(arrStore, { kind: "array" });
+        if (arr.shape.length >= 2) {
+          variables.push(name);
+        }
+      } catch {
+        // Skip arrays we can't open
+      }
+    }
+  }
+
+  return { models, experiments, variables, hierarchyDepth: 2 };
+}
+
+/**
+ * Try to read grid config from coordinate arrays (x, y) in the store.
+ * Falls back to URL param overrides, then to defaults.
+ */
+async function discoverGridConfig(
+  store: IcechunkStore,
+  sampleGroupPath: string,
+  embedConfig: EmbedConfig | null,
+): Promise<GridConfig> {
+  // Try reading x and y coordinate arrays
+  try {
+    const xStore = store.resolve(`${sampleGroupPath}/x`);
+    const yStore = store.resolve(`${sampleGroupPath}/y`);
+
+    const xArr = await zarr.open(xStore, { kind: "array" });
+    const yArr = await zarr.open(yStore, { kind: "array" });
+
+    const xData = await zarr.get(xArr);
+    const yData = await zarr.get(yArr);
+
+    const xValues = new Float64Array(xData.data as unknown as ArrayBuffer);
+    const yValues = new Float64Array(yData.data as unknown as ArrayBuffer);
+
+    if (xValues.length > 1 && yValues.length > 1) {
+      const xMin = xValues[0];
+      const yMin = yValues[0];
+      const cellSizeX = Math.abs(xValues[1] - xValues[0]);
+      const cellSizeY = Math.abs(yValues[1] - yValues[0]);
+      const cellSize = Math.max(cellSizeX, cellSizeY);
+      const width = xValues.length;
+      const height = yValues.length;
+
+      // Validate: cellSize must be positive and coordinates must be finite numbers
+      if (cellSize > 0 && isFinite(xMin) && isFinite(yMin) && isFinite(cellSize)) {
+        const grid: GridConfig = {
+          width,
+          height,
+          cellSize,
+          xMin,
+          yMin,
+          xMax: xMin + width * cellSize,
+          yMax: yMin + height * cellSize,
+        };
+        console.log("[gridConfig] Derived from coordinate arrays:", grid);
+        return grid;
+      }
+      console.warn("[gridConfig] Invalid coordinate values (cellSize=%f, xMin=%f, yMin=%f), falling back", cellSize, xMin, yMin);
+    }
+  } catch (err) {
+    console.warn("[gridConfig] Could not read coordinate arrays, trying fallbacks:", err);
+  }
+
+  // Fallback to URL param overrides
+  if (embedConfig?.grid_width && embedConfig?.grid_height && embedConfig?.cell_size != null) {
+    const width = embedConfig.grid_width;
+    const height = embedConfig.grid_height;
+    const cellSize = embedConfig.cell_size;
+    const xMin = embedConfig.x_min ?? 0;
+    const yMin = embedConfig.y_min ?? 0;
+    const grid: GridConfig = {
+      width,
+      height,
+      cellSize,
+      xMin,
+      yMin,
+      xMax: xMin + width * cellSize,
+      yMax: yMin + height * cellSize,
+    };
+    console.log("[gridConfig] From URL params:", grid);
+    return grid;
+  }
+
+  // Final fallback: ISMIP6 defaults
+  console.log("[gridConfig] Using ISMIP6 defaults");
+  return DEFAULT_GRID;
+}
+
+/**
+ * Try to read the fill_value from zarr array metadata.
+ */
+async function discoverFillValue(
+  store: IcechunkStore,
+  arrayPath: string,
+): Promise<number | null> {
+  try {
+    const arrayStore = store.resolve(arrayPath);
+    const arr = await zarr.open(arrayStore, { kind: "array" });
+    const attrs = arr.attrs as Record<string, unknown>;
+    // zarrita exposes fill_value on the array object
+    const fv = (arr as unknown as Record<string, unknown>).fill_value;
+    if (typeof fv === "number" && isFinite(fv)) {
+      console.log(`[fillValue] From metadata: ${fv}`);
+      return fv;
+    }
+    // Also check _FillValue attribute
+    if (typeof attrs?._FillValue === "number") {
+      console.log(`[fillValue] From _FillValue attr: ${attrs._FillValue}`);
+      return attrs._FillValue;
+    }
+  } catch (err) {
+    console.warn("[fillValue] Could not read fill value:", err);
+  }
+  return null;
+}
+
 export const useViewerStore = create<ViewerState>((set, get) => ({
   // Initial state
   isInitializing: false,
   initError: null,
   store: null,
+  embedConfig: null,
+  gridConfig: DEFAULT_GRID,
   models: [],
   experiments: new Map(),
-  variables: ISMIP6_VARIABLES,
+  variables: [],
+  hierarchyDepth: 2,
+  fillValue: null,
 
   // Start with one empty panel
   panels: [createEmptyPanel()],
   activePanelId: null,
 
   // Shared settings
-  selectedVariable: "lithk",
+  selectedVariable: null,
   timeIndex: 0,
   colormap: "viridis",
   vmin: 0,
@@ -137,13 +384,15 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
   hoveredPanelId: null,
 
   initialize: async () => {
-    set({ isInitializing: true, initError: null });
+    const embedConfig = parseUrlParams();
+    set({ isInitializing: true, initError: null, embedConfig });
     try {
-      // Open the icechunk store
+      // Determine store URL (configurable via embed param)
+      const storeUrl = embedConfig?.store_url || DEFAULT_STORE_URL;
+
       // In dev mode, route virtual chunk URLs through the proxy
       const virtualUrlTransformer = import.meta.env.DEV
         ? (url: string) => {
-            // Transform gs://ismip6/... to /ismip6-proxy/...
             if (url.startsWith("gs://ismip6/")) {
               return url.replace("gs://ismip6/", "/ismip6-proxy/");
             }
@@ -151,39 +400,110 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
           }
         : undefined;
 
-      const store = await IcechunkStore.open(ICECHUNK_URL, {
+      const store = await IcechunkStore.open(storeUrl, {
         ref: "main",
         virtualUrlTransformer,
       });
 
-      // List models from the store (top-level groups)
-      const models = store.listChildren("");
+      // Discover hierarchy (models/experiments/variables)
+      const { models, experiments, variables, hierarchyDepth } =
+        await discoverHierarchy(store, embedConfig?.group_path);
 
-      // Build experiments map by querying each model's subgroups
-      const experiments = new Map<string, string[]>();
-      for (const model of models) {
-        const modelExps = store.listChildren(model);
-        experiments.set(model, modelExps);
+      // Discover grid config from coordinate arrays
+      let sampleGroupPath = "";
+      if (hierarchyDepth === 2 && models.length > 0) {
+        const firstExps = experiments.get(models[0]) || [];
+        if (firstExps.length > 0) {
+          sampleGroupPath = embedConfig?.group_path
+            ? `${embedConfig.group_path}/${models[0]}/${firstExps[0]}`
+            : `${models[0]}/${firstExps[0]}`;
+        }
+      } else if (hierarchyDepth === 1) {
+        const rootExps = experiments.get("_root") || [];
+        sampleGroupPath = embedConfig?.group_path
+          ? `${embedConfig.group_path}/${rootExps[0]}`
+          : rootExps[0] || "";
+      } else {
+        sampleGroupPath = embedConfig?.group_path || "";
       }
 
-      // Get first model's first experiment for the initial panel
-      const firstModel = models.length > 0 ? models[0] : null;
-      const firstModelExps = firstModel ? experiments.get(firstModel) : null;
-      const firstExp = firstModelExps && firstModelExps.length > 0 ? firstModelExps[0] : null;
+      const gridConfig = await discoverGridConfig(store, sampleGroupPath, embedConfig);
 
-      // Initialize first panel with defaults
-      const initialPanel = createEmptyPanel();
-      initialPanel.selectedModel = firstModel;
-      initialPanel.selectedExperiment = firstExp;
+      // Discover fill value from first available variable
+      let fillValue: number | null = null;
+      if (variables.length > 0 && sampleGroupPath) {
+        fillValue = await discoverFillValue(store, `${sampleGroupPath}/${variables[0]}`);
+      }
+
+      // Select initial variable
+      const defaultVariable = variables.length > 0 ? variables[0] : null;
+
+      // Build panels from embed config or defaults
+      let initialPanels: Panel[];
+
+      if (embedConfig?.panels && embedConfig.panels.length > 0) {
+        initialPanels = embedConfig.panels.map((pc) => {
+          const p = createEmptyPanel();
+          p.selectedModel = pc.model;
+          p.selectedExperiment = pc.experiment;
+          return p;
+        });
+      } else if (embedConfig?.model) {
+        const p = createEmptyPanel();
+        p.selectedModel = embedConfig.model;
+        p.selectedExperiment = embedConfig.experiment || (
+          experiments.get(embedConfig.model)?.[0] ?? null
+        );
+        initialPanels = [p];
+      } else if (hierarchyDepth === 2) {
+        const firstModel = models.length > 0 ? models[0] : null;
+        const firstExp = firstModel
+          ? (experiments.get(firstModel)?.[0] ?? null)
+          : null;
+        const p = createEmptyPanel();
+        p.selectedModel = firstModel;
+        p.selectedExperiment = firstExp;
+        initialPanels = [p];
+      } else {
+        // For flat stores, create a panel without model/experiment
+        initialPanels = [createEmptyPanel()];
+      }
+
+      // Apply embed overrides to shared settings
+      const overrides: Partial<ViewerState> = {};
+      if (embedConfig?.variable && variables.includes(embedConfig.variable)) {
+        overrides.selectedVariable = embedConfig.variable;
+      }
+      if (embedConfig?.time !== undefined) overrides.timeIndex = embedConfig.time;
+      if (embedConfig?.colormap) overrides.colormap = embedConfig.colormap;
+      if (embedConfig?.vmin !== undefined) {
+        overrides.vmin = embedConfig.vmin;
+        overrides.autoRange = false;
+      }
+      if (embedConfig?.vmax !== undefined) {
+        overrides.vmax = embedConfig.vmax;
+        overrides.autoRange = false;
+      }
 
       set({
         store,
         models,
         experiments,
-        panels: [initialPanel],
-        activePanelId: initialPanel.id,
+        variables,
+        hierarchyDepth,
+        gridConfig,
+        fillValue,
+        selectedVariable: defaultVariable,
+        panels: initialPanels,
+        activePanelId: initialPanels[0]?.id || null,
         isInitializing: false,
+        ...overrides,
       });
+
+      // Auto-load if embed config requests it
+      if (embedConfig?.autoload) {
+        setTimeout(() => get().loadAllPanels(), 0);
+      }
     } catch (err) {
       console.error("Failed to initialize:", err);
       set({
@@ -197,7 +517,6 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
     const { panels, models, experiments } = get();
     const newPanel = createEmptyPanel();
 
-    // Initialize with first available model/experiment
     if (models.length > 0) {
       newPanel.selectedModel = models[0];
       const modelExps = experiments.get(models[0]);
@@ -214,7 +533,7 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
 
   removePanel: (panelId: string) => {
     const { panels, activePanelId } = get();
-    if (panels.length <= 1) return; // Keep at least one panel
+    if (panels.length <= 1) return;
 
     const newPanels = panels.filter((p) => p.id !== panelId);
     const newActiveId =
@@ -236,7 +555,6 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
 
       const modelExps = experiments.get(model) || [];
       const currentExp = p.selectedExperiment;
-      // Reset experiment if not available for this model
       const newExp = modelExps.includes(currentExp || "")
         ? currentExp
         : modelExps[0] || null;
@@ -263,7 +581,6 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
   },
 
   setTimeIndex: (index: number) => {
-    // Find max time index across all panels
     const maxTime = Math.max(...get().panels.map((p) => p.maxTimeIndex), 0);
     set({ timeIndex: Math.max(0, Math.min(index, maxTime)) });
   },
@@ -289,7 +606,7 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
   },
 
   getValueAtGridPosition: (panelId: string, gridX: number, gridY: number) => {
-    const { panels } = get();
+    const { panels, fillValue } = get();
     const panel = panels.find((p) => p.id === panelId);
     if (!panel?.currentData || !panel?.dataShape) return null;
 
@@ -297,19 +614,26 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
     const idx = gridY * width + gridX;
     const value = panel.currentData[idx];
 
-    if (isNaN(value) || !isFinite(value) || value > 10000) return null;
+    if (isNaN(value) || !isFinite(value)) return null;
+    // Use approximate comparison: float32 data loses precision vs float64 fill value
+    if (Math.abs(value) > 1e10) return null;
+    if (fillValue !== null && Math.abs(value - fillValue) < Math.abs(fillValue) * 1e-6) return null;
     return value;
   },
 
   loadPanelData: async (panelId: string) => {
-    const { store, panels, selectedVariable, timeIndex } = get();
+    const { store, panels, selectedVariable, timeIndex, hierarchyDepth, embedConfig } = get();
     const panel = panels.find((p) => p.id === panelId);
 
-    if (!store || !panel || !panel.selectedModel || !panel.selectedExperiment || !selectedVariable) {
+    if (!store || !panel || !selectedVariable) {
       return;
     }
 
-    // Update panel loading state
+    // For depth-2 hierarchy, require model and experiment
+    if (hierarchyDepth === 2 && (!panel.selectedModel || !panel.selectedExperiment)) {
+      return;
+    }
+
     set({
       panels: panels.map((p) =>
         p.id === panelId ? { ...p, isLoading: true, error: null } : p
@@ -317,49 +641,56 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
     });
 
     try {
-      // Build the path to the variable array
-      const arrayPath = `${panel.selectedModel}/${panel.selectedExperiment}/${selectedVariable}`;
+      // Build path based on hierarchy depth
+      let arrayPath: string;
+      const basePath = embedConfig?.group_path || "";
+
+      if (hierarchyDepth === 2) {
+        arrayPath = basePath
+          ? `${basePath}/${panel.selectedModel}/${panel.selectedExperiment}/${selectedVariable}`
+          : `${panel.selectedModel}/${panel.selectedExperiment}/${selectedVariable}`;
+      } else if (hierarchyDepth === 1) {
+        const group = panel.selectedExperiment || panel.selectedModel || "";
+        arrayPath = basePath
+          ? `${basePath}/${group}/${selectedVariable}`
+          : `${group}/${selectedVariable}`;
+      } else {
+        arrayPath = basePath
+          ? `${basePath}/${selectedVariable}`
+          : selectedVariable;
+      }
+
       console.log(`[Panel ${panelId}] Loading: ${arrayPath}`);
 
-      // Get a store resolved to this path
       const arrayStore = store.resolve(arrayPath);
-
-      // Open the zarr array
       const arr = await zarr.open(arrayStore, { kind: "array" });
 
-      // Get array shape and determine time dimension
       const shape = arr.shape;
       console.log(`[Panel ${panelId}] Array shape: ${shape}`);
 
       let maxTime = 0;
       let dataShape: number[];
 
-      // ISMIP6 arrays are typically (time, y, x) or (y, x)
       if (shape.length === 3) {
         maxTime = shape[0] - 1;
         dataShape = [shape[1], shape[2]];
       } else if (shape.length === 2) {
         dataShape = [shape[0], shape[1]];
       } else {
-        throw new Error(`Unexpected array shape: ${shape}`);
+        throw new Error(`Variable "${selectedVariable}" is not a spatial grid (shape: [${shape}]). Only 2D and 3D arrays are supported.`);
       }
 
-      // Determine slice based on dimensions
       let slice: (number | null)[];
       if (shape.length === 3) {
-        // (time, y, x) - get single time slice
         const t = Math.min(timeIndex, maxTime);
         slice = [t, null, null];
       } else {
-        // (y, x) - get all
         slice = [null, null];
       }
 
-      // Fetch the data
       const result = await zarr.get(arr, slice);
       console.log(`[Panel ${panelId}] Zarr result shape:`, result.shape);
 
-      // Convert to Float32Array
       let data: Float32Array;
       if (result.data instanceof Float32Array) {
         data = result.data;
@@ -371,17 +702,14 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
         throw new Error(`Unexpected data type: ${typeof result.data}`);
       }
 
-      // Debug: check data statistics
+      // Debug stats
       let min = Infinity,
         max = -Infinity,
         nonZeroCount = 0,
         nanCount = 0;
       for (let i = 0; i < data.length; i++) {
         const v = data[i];
-        if (isNaN(v)) {
-          nanCount++;
-          continue;
-        }
+        if (isNaN(v)) { nanCount++; continue; }
         if (v !== 0) nonZeroCount++;
         if (v < min) min = v;
         if (v > max) max = v;
@@ -390,8 +718,12 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
         `[Panel ${panelId}] Loaded ${data.length} values, min=${min}, max=${max}, nonZero=${nonZeroCount}, NaN=${nanCount}`
       );
 
-      // Update panel with loaded data
+      // Re-discover fill value for current variable (different variables may
+      // have different fill values)
+      const newFillValue = await discoverFillValue(store, arrayPath);
+
       set({
+        fillValue: newFillValue,
         panels: get().panels.map((p) =>
           p.id === panelId
             ? { ...p, currentData: data, dataShape, maxTimeIndex: maxTime, isLoading: false }
@@ -399,7 +731,6 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
         ),
       });
 
-      // Auto-range if enabled (compute across all loaded panels)
       if (get().autoRange) {
         computeAutoRange(get);
       }
@@ -421,24 +752,23 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
 
   loadAllPanels: async () => {
     const { panels, loadPanelData } = get();
-    // Load all panels in parallel
     await Promise.all(panels.map((p) => loadPanelData(p.id)));
   },
 }));
 
 // Helper to compute auto range across all loaded panels
 function computeAutoRange(get: () => ViewerState) {
-  const { panels } = get();
-  const MAX_VALID_VALUE = 10000;
+  const { panels, fillValue } = get();
   const allValidValues: number[] = [];
 
   for (const panel of panels) {
     if (!panel.currentData) continue;
     for (let i = 0; i < panel.currentData.length; i++) {
       const v = panel.currentData[i];
-      if (!isNaN(v) && isFinite(v) && v > 0 && v < MAX_VALID_VALUE) {
-        allValidValues.push(v);
-      }
+      if (isNaN(v) || !isFinite(v)) continue;
+      if (Math.abs(v) > 1e10) continue;
+      if (fillValue !== null && Math.abs(v - fillValue) < Math.abs(fillValue) * 1e-6) continue;
+      allValidValues.push(v);
     }
   }
 

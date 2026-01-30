@@ -156,16 +156,14 @@ export function createColormapTexture(
   return data;
 }
 
-// Maximum valid value for ice sheet data (fill values are typically 1e20+)
-const MAX_VALID_VALUE = 10000;
-
 export function dataToRGBA(
   data: Float32Array,
   width: number,
   height: number,
   vmin: number,
   vmax: number,
-  colormapName: string
+  colormapName: string,
+  fillValue?: number | null,
 ): Uint8ClampedArray {
   const rgba = new Uint8ClampedArray(width * height * 4);
   const colors = COLORMAPS[colormapName] || COLORMAPS.viridis;
@@ -174,9 +172,14 @@ export function dataToRGBA(
     const value = data[i];
     const pixelIdx = i * 4;
 
-    // Treat NaN, Infinity, and fill values (> MAX_VALID_VALUE) as transparent
-    if (isNaN(value) || !isFinite(value) || value > MAX_VALID_VALUE || value < 0) {
-      // Transparent for invalid/fill values
+    // Treat NaN, Infinity, and fill values as transparent
+    // Use approximate comparison for fill value because float32 data
+    // loses precision vs float64 metadata fill value
+    const isFill = fillValue != null
+      ? Math.abs(value) > 1e10 || Math.abs(value - fillValue) < Math.abs(fillValue) * 1e-6
+      : Math.abs(value) > 1e10;
+
+    if (isNaN(value) || !isFinite(value) || isFill) {
       rgba[pixelIdx] = 0;
       rgba[pixelIdx + 1] = 0;
       rgba[pixelIdx + 2] = 0;
