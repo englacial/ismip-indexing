@@ -133,7 +133,8 @@ export function applyColormap(
   colormapName: string
 ): RGB {
   const colors = COLORMAPS[colormapName] || COLORMAPS.viridis;
-  const t = (value - vmin) / (vmax - vmin);
+  const range = vmax - vmin;
+  const t = range !== 0 ? (value - vmin) / range : 0.5;
   return interpolateColor(colors, t);
 }
 
@@ -185,7 +186,8 @@ export function dataToRGBA(
       rgba[pixelIdx + 2] = 0;
       rgba[pixelIdx + 3] = 0;
     } else {
-      const t = (value - vmin) / (vmax - vmin);
+      const range = vmax - vmin;
+      const t = range !== 0 ? (value - vmin) / range : 0.5;
       const [r, g, b] = interpolateColor(colors, t);
       rgba[pixelIdx] = r;
       rgba[pixelIdx + 1] = g;
