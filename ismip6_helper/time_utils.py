@@ -7,8 +7,15 @@ to ensure CF-compliance and compatibility with xarray's time decoding.
 
 import re
 import warnings
+import numpy as np
 import xarray as xr
 from typing import Optional
+
+# Standard encoding that all time arrays are normalized to.
+# proleptic_gregorian is the default for numpy datetime64 and works
+# natively with xarray.open_zarr(decode_times=True).
+STANDARD_TIME_UNITS = "days since 2000-01-01"
+STANDARD_TIME_CALENDAR = "proleptic_gregorian"
 
 
 def fix_time_encoding(ds: xr.Dataset, verbose: bool = False) -> xr.Dataset:
@@ -101,6 +108,150 @@ def fix_time_encoding(ds: xr.Dataset, verbose: bool = False) -> xr.Dataset:
 
     # Update the variable attributes
     ds['time'].attrs = attrs
+
+    return ds
+
+
+def normalize_time_encoding(
+    ds: xr.Dataset,
+    target_units: str = STANDARD_TIME_UNITS,
+    target_calendar: str = STANDARD_TIME_CALENDAR,
+    verbose: bool = False,
+) -> xr.Dataset:
+    """
+    Normalize time values and encoding to a standard epoch and calendar.
+
+    This goes beyond fix_time_encoding: it decodes the raw time values using
+    the original (possibly non-standard) encoding, converts to real dates,
+    and re-encodes as float64 values relative to a standard epoch and calendar.
+
+    After normalization, xarray.open_zarr(decode_times=True) will work without
+    any custom fixers, and the JS viewer can use a single decoding path.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        Dataset opened with decode_cf=False, decode_times=False, ideally
+        after fix_time_encoding has been applied to clean up malformed attrs.
+    target_units : str
+        CF units string for the normalized encoding (default: "days since 2000-01-01").
+    target_calendar : str
+        CF calendar for the normalized encoding (default: "proleptic_gregorian").
+    verbose : bool
+        If True, print details about the conversion.
+
+    Returns
+    -------
+    xr.Dataset
+        Dataset with time values re-encoded to the target units/calendar.
+        The time variable will be float64 with the new units and calendar attrs.
+    """
+    import cftime
+
+    ds = ds.copy()
+
+    if 'time' not in ds.variables:
+        return ds
+
+    time_var = ds['time']
+    attrs = dict(time_var.attrs)
+    original_units = attrs.get('units')
+    original_calendar = attrs.get('calendar', '365_day')
+
+    if not original_units:
+        if verbose:
+            print("  - No units on time variable, skipping normalization")
+        return ds
+
+    raw_values = time_var.values
+
+    # Handle "day as %Y%m%d.%f" packed format
+    if 'as %Y' in str(original_units):
+        if verbose:
+            print(f"  - Decoding packed date format: {original_units}")
+        dates = []
+        for v in raw_values.flat:
+            date_int = int(v)
+            y = date_int // 10000
+            m = (date_int % 10000) // 100
+            d = date_int % 100
+            if d < 1:
+                d = 1
+            if m < 1:
+                m = 1
+            dates.append(cftime.datetime(y, m, d, calendar=target_calendar))
+    else:
+        # Detect mislabeled calendars: if the calendar claims to be
+        # standard/gregorian/proleptic_gregorian but the time steps are
+        # constant 365-day intervals, the data was actually produced on a
+        # 365_day (noleap) calendar.
+        decode_calendar = original_calendar
+        vals = np.asarray(raw_values, dtype=np.float64).ravel()
+        if original_calendar in ('standard', 'gregorian', 'proleptic_gregorian') and len(vals) > 2:
+            diffs = np.diff(vals)
+            if np.allclose(diffs, 365.0, atol=0.5):
+                if verbose:
+                    print(f"  - Calendar '{original_calendar}' has constant 365-day steps, "
+                          f"overriding to '365_day' for decoding")
+                decode_calendar = '365_day'
+
+        # Standard CF decode: use cftime.num2date with original encoding
+        try:
+            dates = cftime.num2date(
+                raw_values,
+                units=original_units,
+                calendar=decode_calendar,
+            )
+        except Exception as e:
+            if verbose:
+                print(f"  - Failed to decode time: {e}")
+            return ds
+
+    # Re-encode to target units/calendar
+    # Convert cftime dates to target calendar dates, then to numeric
+    target_dates = []
+    for dt in np.asarray(dates).flat:
+        try:
+            target_dates.append(
+                cftime.datetime(dt.year, dt.month, dt.day, calendar=target_calendar)
+            )
+        except ValueError:
+            # Handle impossible dates (e.g. Feb 30 from 360_day calendar)
+            # Clamp day to valid range for the target calendar month
+            import calendar as cal_mod
+            if target_calendar in ('proleptic_gregorian', 'standard', 'gregorian'):
+                max_day = cal_mod.monthrange(dt.year, dt.month)[1]
+            else:
+                max_day = 28  # safe fallback
+            clamped_day = min(dt.day, max_day)
+            target_dates.append(
+                cftime.datetime(dt.year, dt.month, clamped_day, calendar=target_calendar)
+            )
+
+    new_values = cftime.date2num(
+        target_dates,
+        units=target_units,
+        calendar=target_calendar,
+    )
+
+    new_values = np.asarray(new_values, dtype=np.float64).reshape(raw_values.shape)
+
+    if verbose:
+        print(f"  - Normalized time: {original_units} ({original_calendar})")
+        print(f"    → {target_units} ({target_calendar})")
+        if len(new_values) > 0:
+            print(f"    values: [{new_values[0]:.2f} ... {new_values[-1]:.2f}]")
+
+    # Update the dataset
+    new_attrs = {k: v for k, v in attrs.items() if k not in ('units', 'calendar')}
+    new_attrs['units'] = target_units
+    new_attrs['calendar'] = target_calendar
+
+    ds['time'] = xr.Variable(
+        dims=time_var.dims,
+        data=new_values,
+        attrs=new_attrs,
+    )
 
     return ds
 

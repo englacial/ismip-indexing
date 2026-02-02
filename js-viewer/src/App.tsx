@@ -4,7 +4,9 @@ import { Controls } from "./components/Controls";
 import { useViewerStore } from "./stores/viewerStore";
 
 function FloatingTimeSlider() {
-  const { timeIndex, setTimeIndex, panels } = useViewerStore();
+  const { timeIndex, setTimeIndex, panels, activePanelId } = useViewerStore();
+  const activePanel = panels.find((p) => p.id === activePanelId);
+  const timeLabels = activePanel?.timeLabels || panels.find((p) => p.timeLabels)?.timeLabels || null;
   const maxTimeIndex = Math.max(...panels.map((p) => p.maxTimeIndex), 0);
 
   if (maxTimeIndex === 0) return null;
@@ -28,7 +30,7 @@ function FloatingTimeSlider() {
       }}
     >
       <span style={{ fontSize: "12px", fontWeight: 500, whiteSpace: "nowrap" }}>
-        Time: {timeIndex} / {maxTimeIndex}
+        Time: {timeLabels && timeLabels[timeIndex] ? timeLabels[timeIndex].split("-")[0] : `${timeIndex} / ${maxTimeIndex}`}
       </span>
       <input
         type="range"
