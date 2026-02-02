@@ -114,9 +114,10 @@ def virtualize_and_combine_batch(urls: List[str], parser: Union[HDFParser, NetCD
             loadable_variables=loadable_variables,
             decode_times=False
         )
-        # appy ismip specific fixer functions
+        # apply ismip specific fixer functions
         vds_var_fixed_time = ismip6_helper.fix_time_encoding(vds_var)
-        vds_var_fixed_grid = ismip6_helper.correct_grid_coordinates(vds_var_fixed_time, _parse_variable_from_url(url))
+        vds_var_normalized_time = ismip6_helper.normalize_time_encoding(vds_var_fixed_time)
+        vds_var_fixed_grid = ismip6_helper.correct_grid_coordinates(vds_var_normalized_time, _parse_variable_from_url(url))
         vds_preprocessed = vds_var_fixed_grid
         vdatasets.append(vds_preprocessed)
 

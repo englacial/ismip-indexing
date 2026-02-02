@@ -31,7 +31,10 @@ from .index import (
 
 from .time_utils import (
     fix_time_encoding,
+    normalize_time_encoding,
     open_ismip6_dataset,
+    STANDARD_TIME_UNITS,
+    STANDARD_TIME_CALENDAR,
 )
 
 __version__ = "0.1.0"
@@ -50,5 +53,8 @@ __all__ = [
     "build_file_index",
     # Time utils
     "fix_time_encoding",
+    "normalize_time_encoding",
     "open_ismip6_dataset",
+    "STANDARD_TIME_UNITS",
+    "STANDARD_TIME_CALENDAR",
 ]

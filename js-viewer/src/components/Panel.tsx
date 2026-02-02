@@ -33,7 +33,12 @@ export function Panel({ panel, isActive, canRemove }: PanelProps) {
     getValueAtGridPosition,
     gridConfig,
     fillValue,
+    variableMetadata,
+    timeIndex,
   } = useViewerStore();
+
+  const unitsLabel = variableMetadata?.units || null;
+  const standardName = variableMetadata?.standardName || null;
 
   // Derive grid geometry from store config
   const { width: GRID_WIDTH, height: GRID_HEIGHT, cellSize: CELL_SIZE, xMin: X_MIN, yMin: Y_MIN, xMax: X_MAX, yMax: Y_MAX } = gridConfig;
@@ -46,7 +51,8 @@ export function Panel({ panel, isActive, canRemove }: PanelProps) {
     maxZoom: 0,
   }), [CENTER_X, CENTER_Y]);
 
-  const { currentData, dataShape, selectedModel, selectedExperiment, isLoading, error } = panel;
+  const { currentData, dataShape, selectedModel, selectedExperiment, isLoading, error, groupMetadata } = panel;
+  const [showInfo, setShowInfo] = useState(false);
 
   const availableExperiments = selectedModel
     ? experiments.get(selectedModel) || []
@@ -125,6 +131,7 @@ export function Panel({ panel, isActive, canRemove }: PanelProps) {
         model: p.selectedModel!,
         experiment: p.selectedExperiment!,
         value: getValueAtGridPosition(p.id, gridX, gridY),
+        timeLabel: p.timeLabels?.[timeIndex] || null,
       }));
   }, [hoverGridPosition, panels, getValueAtGridPosition]);
 
@@ -378,17 +385,17 @@ export function Panel({ panel, isActive, canRemove }: PanelProps) {
                 }}
               >
                 <span style={{ opacity: 0.8 }}>
-                  {hv.model}/{hv.experiment}:
+                  {hv.model}/{hv.experiment}{hv.timeLabel ? ` [${hv.timeLabel}]` : ""}:
                 </span>
                 <span>
-                  {hv.value !== null ? formatValue(hv.value) : "N/A"}
+                  {hv.value !== null ? `${formatValue(hv.value)}${unitsLabel ? ` ${unitsLabel}` : ""}` : "N/A"}
                 </span>
               </div>
             ))}
           </div>
         )}
 
-        {/* Panel label */}
+        {/* Panel label with info button */}
         {currentData && (
           <div
             style={{
@@ -399,9 +406,69 @@ export function Panel({ panel, isActive, canRemove }: PanelProps) {
               padding: "4px 8px",
               borderRadius: "4px",
               fontSize: "11px",
+              maxWidth: "calc(100% - 16px)",
             }}
           >
-            {selectedModel} / {selectedExperiment}
+            <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+              <span style={{ fontWeight: 500 }}>{selectedModel} / {selectedExperiment}</span>
+              {groupMetadata && (
+                <button
+                  onClick={(e) => { e.stopPropagation(); setShowInfo(!showInfo); }}
+                  style={{
+                    background: "none", border: "1px solid #999", borderRadius: "50%",
+                    width: "16px", height: "16px", fontSize: "10px", lineHeight: "14px",
+                    cursor: "pointer", padding: 0, color: "#666",
+                  }}
+                  title="Show metadata"
+                >
+                  i
+                </button>
+              )}
+            </div>
+            {standardName && (
+              <div style={{ fontSize: "10px", color: "#666", marginTop: "2px" }}>
+                {standardName}{unitsLabel ? ` (${unitsLabel})` : ""}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Group metadata info panel */}
+        {showInfo && groupMetadata && (
+          <div
+            style={{
+              position: "absolute",
+              bottom: "48px",
+              left: "8px",
+              right: "8px",
+              background: "rgba(255,255,255,0.95)",
+              padding: "10px 12px",
+              borderRadius: "4px",
+              fontSize: "11px",
+              zIndex: 300,
+              maxHeight: "200px",
+              overflowY: "auto",
+              boxShadow: "0 2px 8px rgba(0,0,0,0.15)",
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "6px" }}>
+              <span style={{ fontWeight: 600, fontSize: "12px" }}>Metadata</span>
+              <button
+                onClick={() => setShowInfo(false)}
+                style={{ background: "none", border: "none", cursor: "pointer", fontSize: "14px", color: "#666" }}
+              >
+                x
+              </button>
+            </div>
+            {Object.entries(groupMetadata)
+              .filter(([, v]) => v !== null)
+              .map(([key, value]) => (
+                <div key={key} style={{ marginBottom: "4px" }}>
+                  <span style={{ fontWeight: 500, color: "#444" }}>{key}: </span>
+                  <span style={{ color: "#666", wordBreak: "break-word" }}>{value}</span>
+                </div>
+              ))}
           </div>
         )}
       </div>
