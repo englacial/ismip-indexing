@@ -8,10 +8,12 @@ export function Controls() {
     variables,
     selectedVariable,
     timeIndex,
+    activePanelId,
     colormap,
     vmin,
     vmax,
     autoRange,
+    variableMetadata,
     setSelectedVariable,
     setTimeIndex,
     setColormap,
@@ -21,8 +23,15 @@ export function Controls() {
     loadAllPanels,
   } = useViewerStore();
 
+  const unitsLabel = variableMetadata?.units || null;
+  const standardName = variableMetadata?.standardName || null;
+
   // Find max time index across all panels
   const maxTimeIndex = Math.max(...panels.map((p) => p.maxTimeIndex), 0);
+
+  // Get time labels from the active panel (or first panel with labels)
+  const activePanel = panels.find((p) => p.id === activePanelId);
+  const timeLabels = activePanel?.timeLabels || panels.find((p) => p.timeLabels)?.timeLabels || null;
 
   // Check if any panel is loading
   const anyLoading = panels.some((p) => p.isLoading);
@@ -113,6 +122,12 @@ export function Controls() {
             </option>
           ))}
         </select>
+        {(standardName || unitsLabel) && (
+          <div style={{ marginTop: "4px", fontSize: "11px", color: "#666" }}>
+            {standardName && <div>{standardName}</div>}
+            {unitsLabel && <div>Units: {unitsLabel}</div>}
+          </div>
+        )}
       </div>
 
       {/* Load All Data Button */}
@@ -147,7 +162,7 @@ export function Controls() {
               fontWeight: 500,
             }}
           >
-            Time: {timeIndex} / {maxTimeIndex}
+            Time: {timeLabels && timeLabels[timeIndex] ? timeLabels[timeIndex].split("-")[0] : `${timeIndex} / ${maxTimeIndex}`}
           </label>
           <input
             type="range"
@@ -269,7 +284,7 @@ export function Controls() {
 
       {/* Current Range Display */}
       <div style={{ fontSize: "12px", color: "#666" }}>
-        Current range: {formatValue(vmin)} - {formatValue(vmax)}
+        Current range: {formatValue(vmin)} - {formatValue(vmax)}{unitsLabel ? ` ${unitsLabel}` : ""}
       </div>
 
       <hr
@@ -288,6 +303,11 @@ export function Controls() {
         >
           Color Scale
         </label>
+        {unitsLabel && (
+          <div style={{ fontSize: "11px", color: "#666", marginBottom: "4px", textAlign: "center" }}>
+            {unitsLabel}
+          </div>
+        )}
         <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
           <div style={{ fontSize: "11px", width: "40px", textAlign: "right" }}>
             {formatValue(vmin)}

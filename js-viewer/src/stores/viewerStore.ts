@@ -3,6 +3,7 @@ import { IcechunkStore } from "icechunk-js";
 import * as zarr from "zarrita";
 import { registerCodecs } from "../utils/codecs";
 import { parseUrlParams, EmbedConfig } from "../utils/urlParams";
+import { parseTimeUnits, decodeTimeArray, yearFromLabel, findIndexForYear } from "../utils/cftime";
 
 // Register numcodecs codecs at module load time
 registerCodecs();
@@ -35,6 +36,23 @@ const DEFAULT_GRID: GridConfig = {
   yMax: -3040000 + 761 * 8000,
 };
 
+// Metadata for the currently loaded variable (from zarr array attrs)
+export interface VariableMetadata {
+  units: string | null;
+  standardName: string | null;
+}
+
+// Metadata for a group (model/experiment) from zarr group attrs
+export interface GroupMetadata {
+  title: string | null;
+  institution: string | null;
+  source: string | null;
+  contact: string | null;
+  references: string | null;
+  comment: string | null;
+  [key: string]: string | null;
+}
+
 // Panel represents a single visualization panel
 export interface Panel {
   id: string;
@@ -45,6 +63,8 @@ export interface Panel {
   isLoading: boolean;
   error: string | null;
   maxTimeIndex: number;
+  groupMetadata: GroupMetadata | null;
+  timeLabels: string[] | null;
 }
 
 // Known coordinate/dimension variable names to exclude from data variables
@@ -78,6 +98,9 @@ interface ViewerState {
   // Fill value for masking (from zarr metadata or default)
   fillValue: number | null;
 
+  // Variable metadata (units, standard_name) for the current variable
+  variableMetadata: VariableMetadata | null;
+
   // Panels
   panels: Panel[];
   activePanelId: string | null;
@@ -85,6 +108,7 @@ interface ViewerState {
   // Shared settings (apply to all panels)
   selectedVariable: string | null;
   timeIndex: number;
+  targetYear: number | null; // target year for cross-model time alignment
   colormap: string;
   vmin: number;
   vmax: number;
@@ -134,6 +158,8 @@ function createEmptyPanel(): Panel {
     isLoading: false,
     error: null,
     maxTimeIndex: 0,
+    groupMetadata: null,
+    timeLabels: null,
   };
 }
 
@@ -355,6 +381,94 @@ async function discoverFillValue(
   return null;
 }
 
+/**
+ * Read variable-level metadata (units, standard_name) from zarr array attrs.
+ */
+async function discoverVariableMetadata(
+  store: IcechunkStore,
+  arrayPath: string,
+): Promise<VariableMetadata> {
+  try {
+    const arrayStore = store.resolve(arrayPath);
+    const arr = await zarr.open(arrayStore, { kind: "array" });
+    const attrs = arr.attrs as Record<string, unknown>;
+    return {
+      units: typeof attrs?.units === "string" ? attrs.units : null,
+      standardName: typeof attrs?.standard_name === "string" ? attrs.standard_name : null,
+    };
+  } catch (err) {
+    console.warn("[variableMetadata] Could not read:", err);
+    return { units: null, standardName: null };
+  }
+}
+
+/**
+ * Read group-level metadata (title, institution, etc.) from zarr group attrs.
+ */
+async function discoverGroupMetadata(
+  store: IcechunkStore,
+  groupPath: string,
+): Promise<GroupMetadata | null> {
+  try {
+    const groupStore = store.resolve(groupPath);
+    const group = await zarr.open(groupStore, { kind: "group" });
+    const attrs = group.attrs as Record<string, unknown>;
+    if (!attrs || Object.keys(attrs).length === 0) return null;
+
+    const meta: GroupMetadata = {
+      title: null, institution: null, source: null,
+      contact: null, references: null, comment: null,
+    };
+    for (const key of Object.keys(attrs)) {
+      const val = attrs[key];
+      if (typeof val === "string") {
+        const lk = key.toLowerCase();
+        if (lk in meta) {
+          meta[lk] = val;
+        } else {
+          meta[key] = val;
+        }
+      }
+    }
+    return meta;
+  } catch (err) {
+    console.warn("[groupMetadata] Could not read:", err);
+    return null;
+  }
+}
+
+/**
+ * Read the time coordinate array and decode values to date strings.
+ */
+async function discoverTimeLabels(
+  store: IcechunkStore,
+  groupPath: string,
+): Promise<string[] | null> {
+  try {
+    const timeStore = store.resolve(`${groupPath}/time`);
+    const timeArr = await zarr.open(timeStore, { kind: "array" });
+    const attrs = timeArr.attrs as Record<string, unknown>;
+
+    const units = typeof attrs?.units === "string" ? attrs.units : null;
+    const calendar = typeof attrs?.calendar === "string" ? attrs.calendar : null;
+
+    const encoding = parseTimeUnits(units, calendar);
+    if (!encoding) {
+      console.warn("[timeLabels] Could not parse time encoding, units=", units, "calendar=", calendar);
+      return null;
+    }
+
+    const timeData = await zarr.get(timeArr);
+    const values = new Float64Array(timeData.data as unknown as ArrayBuffer);
+    const labels = decodeTimeArray(values, encoding);
+    console.log(`[timeLabels] Decoded ${labels.length} time labels, first=${labels[0]}, last=${labels[labels.length - 1]}`);
+    return labels;
+  } catch (err) {
+    console.warn("[timeLabels] Could not read time array:", err);
+    return null;
+  }
+}
+
 export const useViewerStore = create<ViewerState>((set, get) => ({
   // Initial state
   isInitializing: false,
@@ -367,6 +481,7 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
   variables: [],
   hierarchyDepth: 2,
   fillValue: null,
+  variableMetadata: null,
 
   // Start with one empty panel
   panels: [createEmptyPanel()],
@@ -375,6 +490,7 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
   // Shared settings
   selectedVariable: null,
   timeIndex: 0,
+  targetYear: null,
   colormap: "viridis",
   vmin: 0,
   vmax: 4000,
@@ -586,8 +702,14 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
   },
 
   setTimeIndex: (index: number) => {
-    const maxTime = Math.max(...get().panels.map((p) => p.maxTimeIndex), 0);
-    set({ timeIndex: Math.max(0, Math.min(index, maxTime)) });
+    const { panels, activePanelId } = get();
+    const maxTime = Math.max(...panels.map((p) => p.maxTimeIndex), 0);
+    const clamped = Math.max(0, Math.min(index, maxTime));
+    // Derive target year from the active panel's time labels
+    const activePanel = panels.find((p) => p.id === activePanelId);
+    const timeLabels = activePanel?.timeLabels || panels.find((p) => p.timeLabels)?.timeLabels || null;
+    const targetYear = timeLabels?.[clamped] ? yearFromLabel(timeLabels[clamped]) : null;
+    set({ timeIndex: clamped, targetYear });
   },
 
   setColormap: (colormap: string) => {
@@ -627,7 +749,7 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
   },
 
   loadPanelData: async (panelId: string) => {
-    const { store, panels, selectedVariable, timeIndex, hierarchyDepth, embedConfig } = get();
+    const { store, panels, selectedVariable, timeIndex, targetYear, hierarchyDepth, embedConfig } = get();
     const panel = panels.find((p) => p.id === panelId);
 
     if (!store || !panel || !selectedVariable) {
@@ -685,10 +807,32 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
         throw new Error(`Variable "${selectedVariable}" is not a spatial grid (shape: [${shape}]). Only 2D and 3D arrays are supported.`);
       }
 
+      // Discover group-level metadata and time labels BEFORE fetching data
+      // so we can resolve the correct per-panel time index by year
+      let groupMeta: GroupMetadata | null = null;
+      let timeLabels: string[] | null = null;
+      if (hierarchyDepth === 2 && panel.selectedModel && panel.selectedExperiment) {
+        const groupPath = embedConfig?.group_path
+          ? `${embedConfig.group_path}/${panel.selectedModel}/${panel.selectedExperiment}`
+          : `${panel.selectedModel}/${panel.selectedExperiment}`;
+        groupMeta = await discoverGroupMetadata(store, groupPath);
+        if (maxTime > 0) {
+          timeLabels = await discoverTimeLabels(store, groupPath);
+        }
+      }
+
+      // Resolve time index: if we have a target year and this panel has
+      // time labels, find the index whose year best matches the target.
+      // This aligns panels that have different time ranges.
+      let resolvedTimeIndex = Math.min(timeIndex, maxTime);
+      if (targetYear !== null && timeLabels && timeLabels.length > 0) {
+        resolvedTimeIndex = findIndexForYear(timeLabels, targetYear);
+        console.log(`[Panel ${panelId}] Year-aligned: targetYear=${targetYear}, resolvedIndex=${resolvedTimeIndex} (${timeLabels[resolvedTimeIndex]})`);
+      }
+
       let slice: (number | null)[];
       if (shape.length === 3) {
-        const t = Math.min(timeIndex, maxTime);
-        slice = [t, null, null];
+        slice = [resolvedTimeIndex, null, null];
       } else {
         slice = [null, null];
       }
@@ -723,18 +867,24 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
         `[Panel ${panelId}] Loaded ${data.length} values, min=${min}, max=${max}, nonZero=${nonZeroCount}, NaN=${nanCount}`
       );
 
-      // Re-discover fill value for current variable (different variables may
-      // have different fill values)
+      // Re-discover fill value and variable metadata for current variable
       const newFillValue = await discoverFillValue(store, arrayPath);
+      const varMeta = await discoverVariableMetadata(store, arrayPath);
 
-      set({
+      // If targetYear hasn't been set yet, derive it from this panel's time labels
+      const updates: Record<string, unknown> = {
         fillValue: newFillValue,
+        variableMetadata: varMeta,
         panels: get().panels.map((p) =>
           p.id === panelId
-            ? { ...p, currentData: data, dataShape, maxTimeIndex: maxTime, isLoading: false }
+            ? { ...p, currentData: data, dataShape, maxTimeIndex: maxTime, isLoading: false, groupMetadata: groupMeta, timeLabels }
             : p
         ),
-      });
+      };
+      if (get().targetYear === null && timeLabels && timeLabels[resolvedTimeIndex]) {
+        updates.targetYear = yearFromLabel(timeLabels[resolvedTimeIndex]);
+      }
+      set(updates as Partial<ViewerState>);
 
       if (get().autoRange) {
         computeAutoRange(get);
