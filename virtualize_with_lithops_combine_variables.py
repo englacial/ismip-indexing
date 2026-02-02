@@ -1,6 +1,8 @@
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed, Future
 import threading
+import json
+import os
 
 import lithops
 import icechunk
@@ -46,29 +48,116 @@ def infer_cloud_backend(config_file: str) -> str:
         raise ValueError(f"Cannot infer cloud backend from lithops config backend: {backend!r}")
 
 
-def virtualize_and_combine_batch(urls: List[str], parser: Union[HDFParser, NetCDF3Parser], registry: ObjectStoreRegistry) -> Dict[str, Any]:
+def virtualize_and_combine_batch(urls: List[str], parser: Union[HDFParser, NetCDF3Parser], registry: ObjectStoreRegistry, group_path: str = None, max_retries: int = 3) -> Dict[str, Any]:
     # Take a batch of datasets that belong to a single simulation (same model + experiment) and merge them into
     # a single virtual dataset
 
-    # create virtual datasets (can we speed this up in parallel if we group them? Not a prio right now)
+    # create virtual datasets in parallel
     loadable_variables = ['x', 'y', 'lat', 'lon', 'latitude', 'longitude', 'nv4', 'lon_bnds', 'lat_bnds']
 
-    # virtualize and append all needed metadata (for now just the variable)
-    vdatasets = []
-    for url in urls:
-        vds_var = open_virtual_dataset(
-            url=url,
-            parser=parser,
-            registry=registry,
-            loadable_variables=loadable_variables,
-            decode_times=False
-        )
-        # apply ismip specific fixer functions
-        vds_var_fixed_time = ismip6_helper.fix_time_encoding(vds_var)
-        vds_var_fixed_grid = ismip6_helper.correct_grid_coordinates(vds_var_fixed_time, _parse_variable_from_url(url))
-        vds_preprocessed = vds_var_fixed_grid
-        vdatasets.append(vds_preprocessed)
+    def process_single_url(url: str):
+        """Process a single URL and return the preprocessed virtual dataset and shape info, or error.
+        Retries on GCS-related errors with exponential backoff."""
+        import time as _time
+        import random as _random
 
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                if attempt > 0:
+                    print(f"  Retry {attempt}/{max_retries} for {url.split('/')[-1]}")
+                else:
+                    print(f"URL IS {url}")
+
+                vds_var = open_virtual_dataset(
+                    url=url,
+                    parser=parser,
+                    registry=registry,
+                    loadable_variables=loadable_variables,
+                    decode_times=False
+                )
+                shape = str(vds_var.sizes)
+                # apply ismip specific fixer functions
+                vds_var_fixed_time = ismip6_helper.fix_time_encoding(vds_var)
+                vds_var_fixed_grid = ismip6_helper.correct_grid_coordinates(vds_var_fixed_time, _parse_variable_from_url(url))
+                vds_preprocessed = vds_var_fixed_grid
+
+                if attempt > 0:
+                    print(f"  Success on attempt {attempt + 1} for {url.split('/')[-1]}")
+                return {'success': True, 'url': url, 'shape': shape, 'vds': vds_preprocessed}
+
+            except Exception as e:
+                last_error = e
+                err_str = str(e).lower()
+
+                # Check if error is GCS-related and retryable
+                retryable = ('Generic GCS error' in err_str)
+
+                if retryable and attempt < max_retries - 1:
+                    # Exponential backoff with jitter: 1s, 2s, 4s, ...
+                    delay = (2 ** attempt) + _random.uniform(0, 1)
+                    print(f"  Retryable error for {url.split('/')[-1]}: {str(e)[:100]}, retrying in {delay:.1f}s...")
+                    _time.sleep(delay)
+                    continue
+                else:
+                    # Non-retryable error or exhausted retries
+                    break
+
+        return {'success': False, 'url': url, 'error': str(last_error)}
+
+    # Process all URLs in parallel
+    vdatasets = []
+    shapes = {}
+    failed_urls = {}
+    # got generic gcs error with max_workers=10
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        results = executor.map(process_single_url, urls)
+        for result in results:
+            if result['success']:
+                url = result['url']
+                shape = result['shape']
+                vds_preprocessed = result['vds']
+                if shape not in shapes:
+                    shapes[shape] = []
+                shapes[shape].append(url)
+                vdatasets.append(vds_preprocessed)
+            else:
+                # Track failed URLs with their errors
+                failed_urls[result['url']] = result['error']
+
+    # Log any errors (failed files or shape mismatches) to JSON file
+    log_file = "errors.json"
+    has_errors = len(failed_urls) > 0 or len(shapes.keys()) > 1
+
+    if has_errors:
+        # TODO: This will only work locally, if running on cloud lithops we need to write to a shared file
+        try:
+            with open(log_file, 'r') as f:
+                existing_data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            existing_data = {}
+
+        error_entry = {}
+
+        if failed_urls:
+            error_entry['failed_files'] = failed_urls
+
+        if len(shapes.keys()) > 1:
+            error_entry['shape_mismatch'] = shapes
+
+        existing_data[group_path or "unknown_group"] = error_entry
+
+        with open(log_file, 'w') as f:
+            json.dump(existing_data, f, indent=2)
+
+    # Raise errors after logging
+    if failed_urls:
+        raise ValueError(f"Failed to open {len(failed_urls)} file(s) in group {group_path or 'unknown_group'}")
+
+    if len(shapes.keys()) > 1:
+        raise ValueError(f"Shape mismatch in group {group_path or 'unknown_group'}: found {len(shapes)} different shapes")
+
+    # All files succeeded and shapes match
     vds = xr.merge(vdatasets, join='override', compat='override')
 
     # Split single-chunk contiguous arrays into per-time-slice virtual chunks
@@ -88,7 +177,7 @@ def batch_virt_func(batch: Tuple[Tuple[str], List[Dict[str, Union[str, int]]]]) 
         bucket = "gs://ismip6"
         store = obstore.store.from_url(bucket, skip_signature=True)
         registry = ObjectStoreRegistry({bucket: store})
-        vds = virtualize_and_combine_batch(batch['urls'], parser, registry)
+        vds = virtualize_and_combine_batch(batch['urls'], parser, registry, group_path=batch.get('path'))
         return {
                 'success': True,
                 'batch': batch,
@@ -232,7 +321,7 @@ def get_repo_kwargs(local_storage: bool = False, cloud_backend: str = "aws") -> 
     else:  # gcp
         storage = icechunk.gcs_storage(
             bucket="ismip6-icechunk",
-            prefix="combined-variables-2025-12-19-v2",
+            prefix="manual-transfer",
             from_env=True,
         )
 
@@ -314,6 +403,7 @@ def process_all_files(
     concurrent_writes: bool = True,
     test_model: str = None,
     test_experiment: str = None,
+    dry_run: bool = False,
 ):
     """Process all files using Lithops serverless executor.
 
@@ -323,6 +413,16 @@ def process_all_files(
        - Virtualize files (~20) in serial and combine into single xarray dataset
        - Write virtual dataset to Icechunk in one commit (with conflict resolution)
     3. Process batches (~440) in parallel using lithops
+
+    Args:
+        local_storage: Use local filesystem for icechunk store instead of cloud.
+        local_execution: Use localhost lithops backend.
+        config_file: Lithops config file path.
+        cloud_backend: 'aws', 'gcp', or 'local'.
+        concurrent_writes: Enable parallel writes (grouped by model).
+        test_model: Filter to a single model for testing.
+        test_experiment: Filter to a single experiment for testing.
+        dry_run: Skip Step 4 (writing to icechunk). Useful for testing virtualization.
     """
     import warnings
     # Silence the specific Zarr warning
@@ -389,7 +489,8 @@ def process_all_files(
     print(f"Step 2/3 Complete: Created {len(batches)} batches")
 
     # Initialize Lithops executor
-    fexec = lithops.FunctionExecutor(config_file=config_file)
+    # fexec = lithops.FunctionExecutor(config_file=config_file)
+    fexec = lithops.LocalhostExecutor(config_file=config_file)
 
     # Step 3: Virtualize files with maximum concurrency
     virt_futures = fexec.map(batch_virt_func, [{'batch': b} for b in batches])
@@ -414,6 +515,18 @@ def process_all_files(
     # model are written sequentially, avoiding icechunk rebase conflicts on
     # shared parent group nodes. Different models run in parallel.
     writing_results = []
+
+    if dry_run:
+        print("\n*** DRY RUN MODE: Skipping Step 4 (writing to icechunk) ***")
+        print(f"Would write {len(successful_results)} virtualized datasets to icechunk")
+        for r in successful_results:
+            print(f"  [DRY RUN] {r['batch']['path']}")
+        return {
+            'successful': [],
+            'failed': [],
+            'skipped_due_to_dry_run': successful_results
+        }
+
     if concurrent_writes:
         # Group successful results by model prefix
         from collections import defaultdict
@@ -526,6 +639,10 @@ if __name__ == "__main__":
         "--sequential-writes", action="store_true",
         help="Disable concurrent writes (use serial loop). Default is concurrent on AWS."
     )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Skip Step 4 (writing to icechunk). Useful for testing virtualization without modifying the store."
+    )
     args = parser.parse_args()
 
     # Infer backend from config, or default based on config filename
@@ -551,18 +668,25 @@ if __name__ == "__main__":
         concurrent_writes=concurrent_writes,
         test_model=args.test_model,
         test_experiment=args.test_experiment,
+        dry_run=args.dry_run,
     )
 
-    successes = [get_id_from_batch(r['batch']) for r in result['successful']]
-    print(f"\nSuccessful: {successes}")
+    if args.dry_run:
+        skipped = [get_id_from_batch(r['batch']) for r in result.get('skipped_due_to_dry_run', [])]
+        print(f"\nDry run complete. Would have written {len(skipped)} datasets:")
+        for batch_id in skipped:
+            print(f"  - {batch_id}")
+    else:
+        successes = [get_id_from_batch(r['batch']) for r in result['successful']]
+        print(f"\nSuccessful: {successes}")
 
-    if result['failed']:
-        print("\nFailures by error:")
-        fails_by_error = {}
-        for r in result['failed']:
-            err = r.get('error', 'unknown')
-            fails_by_error.setdefault(err, []).append(get_id_from_batch(r['batch']))
-        for err, ids in fails_by_error.items():
-            print(f"  {err[:200]}")
-            for batch_id in ids:
-                print(f"    - {batch_id}")
+        if result['failed']:
+            print("\nFailures by error:")
+            fails_by_error = {}
+            for r in result['failed']:
+                err = r.get('error', 'unknown')
+                fails_by_error.setdefault(err, []).append(get_id_from_batch(r['batch']))
+            for err, ids in fails_by_error.items():
+                print(f"  {err[:200]}")
+                for batch_id in ids:
+                    print(f"    - {batch_id}")
