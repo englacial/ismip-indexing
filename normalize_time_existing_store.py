@@ -103,8 +103,11 @@ def normalize_time_in_group(root, group_path: str, dry_run: bool = False) -> boo
         for v in np.asarray(raw_values).flat:
             date_int = int(v)
             y = date_int // 10000
-            m = max((date_int % 10000) // 100, 1)
-            d = max(date_int % 100, 1)
+            m = (date_int % 10000) // 100
+            d = date_int % 100
+            if y < 1 or m < 1 or m > 12 or d < 1 or d > 31:
+                print(f"  ERROR {group_path}: invalid packed date value {v} -> y={y} m={m} d={d}")
+                return False
             dates.append(
                 cftime.datetime(y, m, d, calendar=ismip6_helper.STANDARD_TIME_CALENDAR)
             )

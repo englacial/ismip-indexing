@@ -34,7 +34,6 @@ export function Panel({ panel, isActive, canRemove }: PanelProps) {
     gridConfig,
     fillValue,
     variableMetadata,
-    timeIndex,
   } = useViewerStore();
 
   const unitsLabel = variableMetadata?.units || null;
@@ -131,12 +130,15 @@ export function Panel({ panel, isActive, canRemove }: PanelProps) {
         model: p.selectedModel!,
         experiment: p.selectedExperiment!,
         value: getValueAtGridPosition(p.id, gridX, gridY),
-        timeLabel: p.timeLabels?.[timeIndex] || null,
+        timeLabel: p.resolvedTimeIndex !== null ? (p.timeLabels?.[p.resolvedTimeIndex] ?? null) : null,
       }));
   }, [hoverGridPosition, panels, getValueAtGridPosition]);
 
+  // Hide data when the target year is outside this panel's time range
+  const outOfRange = panel.resolvedTimeIndex === null && panel.timeLabels !== null;
+
   const layers = useMemo(() => {
-    if (!bitmap) return [];
+    if (!bitmap || outOfRange) return [];
 
     return [
       new BitmapLayer({
@@ -146,7 +148,7 @@ export function Panel({ panel, isActive, canRemove }: PanelProps) {
         pickable: false,
       }),
     ];
-  }, [bitmap, panel.id]);
+  }, [bitmap, panel.id, outOfRange]);
 
   const views = new OrthographicView({
     id: "ortho",
@@ -333,8 +335,26 @@ export function Panel({ panel, isActive, canRemove }: PanelProps) {
           </div>
         )}
 
+        {/* Out of range overlay */}
+        {outOfRange && currentData && (
+          <div
+            style={{
+              position: "absolute",
+              top: "50%",
+              left: "50%",
+              transform: "translate(-50%, -50%)",
+              textAlign: "center",
+              color: "white",
+            }}
+          >
+            <div style={{ fontSize: "14px", opacity: 0.7 }}>
+              No data for selected year
+            </div>
+          </div>
+        )}
+
         {/* No data message */}
-        {!currentData && !isLoading && (
+        {!currentData && !isLoading && !outOfRange && (
           <div
             style={{
               position: "absolute",

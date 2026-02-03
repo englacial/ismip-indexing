@@ -2,14 +2,15 @@ import { useEffect } from "react";
 import { Panel } from "./components/Panel";
 import { Controls } from "./components/Controls";
 import { useViewerStore } from "./stores/viewerStore";
+import { yearRange } from "./utils/cftime";
 
 function FloatingTimeSlider() {
-  const { timeIndex, setTimeIndex, panels, activePanelId } = useViewerStore();
-  const activePanel = panels.find((p) => p.id === activePanelId);
-  const timeLabels = activePanel?.timeLabels || panels.find((p) => p.timeLabels)?.timeLabels || null;
-  const maxTimeIndex = Math.max(...panels.map((p) => p.maxTimeIndex), 0);
+  const { timeIndex, setTimeIndex, panels } = useViewerStore();
+  const range = yearRange(panels.map((p) => p.timeLabels));
+  const maxSlider = range ? range.maxYear - range.minYear : 0;
+  const currentYear = range ? range.minYear + timeIndex : null;
 
-  if (maxTimeIndex === 0) return null;
+  if (maxSlider === 0) return null;
 
   return (
     <div
@@ -30,12 +31,12 @@ function FloatingTimeSlider() {
       }}
     >
       <span style={{ fontSize: "12px", fontWeight: 500, whiteSpace: "nowrap" }}>
-        Time: {timeLabels && timeLabels[timeIndex] ? timeLabels[timeIndex].split("-")[0] : `${timeIndex} / ${maxTimeIndex}`}
+        Year: {currentYear ?? timeIndex}
       </span>
       <input
         type="range"
         min={0}
-        max={maxTimeIndex}
+        max={maxSlider}
         value={timeIndex}
         onChange={(e) => setTimeIndex(parseInt(e.target.value, 10))}
         style={{ flex: 1 }}
