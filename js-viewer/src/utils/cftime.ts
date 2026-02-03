@@ -221,10 +221,24 @@ export function yearFromLabel(label: string): number {
  * Find the index in timeLabels whose year is closest to the target year.
  * Returns 0 if no match found.
  */
+/**
+ * Find the index in timeLabels whose year is closest to the target year.
+ * Returns null if the target year is outside the range of years in the labels.
+ */
 export function findIndexForYear(
   timeLabels: string[],
   targetYear: number,
-): number {
+): number | null {
+  if (timeLabels.length === 0) return null;
+
+  const firstYear = yearFromLabel(timeLabels[0]);
+  const lastYear = yearFromLabel(timeLabels[timeLabels.length - 1]);
+  const lo = Math.min(firstYear, lastYear);
+  const hi = Math.max(firstYear, lastYear);
+
+  // Out of range — no data for this year
+  if (targetYear < lo || targetYear > hi) return null;
+
   let bestIdx = 0;
   let bestDiff = Infinity;
   for (let i = 0; i < timeLabels.length; i++) {
@@ -236,4 +250,25 @@ export function findIndexForYear(
     }
   }
   return bestIdx;
+}
+
+/**
+ * Get the min and max years across an array of time label arrays.
+ */
+export function yearRange(
+  allTimeLabels: (string[] | null)[],
+): { minYear: number; maxYear: number } | null {
+  let min = Infinity;
+  let max = -Infinity;
+  for (const labels of allTimeLabels) {
+    if (!labels || labels.length === 0) continue;
+    const first = yearFromLabel(labels[0]);
+    const last = yearFromLabel(labels[labels.length - 1]);
+    if (first < min) min = first;
+    if (last > max) max = last;
+    if (first > max) max = first;
+    if (last < min) min = last;
+  }
+  if (!isFinite(min)) return null;
+  return { minYear: min, maxYear: max };
 }

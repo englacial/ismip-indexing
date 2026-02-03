@@ -1,6 +1,7 @@
 import { useViewerStore } from "../stores/viewerStore";
 import { COLORMAP_NAMES } from "../utils/colormap";
 import { formatValue } from "../utils/format";
+import { yearRange } from "../utils/cftime";
 
 export function Controls() {
   const {
@@ -8,7 +9,6 @@ export function Controls() {
     variables,
     selectedVariable,
     timeIndex,
-    activePanelId,
     colormap,
     vmin,
     vmax,
@@ -26,12 +26,10 @@ export function Controls() {
   const unitsLabel = variableMetadata?.units || null;
   const standardName = variableMetadata?.standardName || null;
 
-  // Find max time index across all panels
-  const maxTimeIndex = Math.max(...panels.map((p) => p.maxTimeIndex), 0);
-
-  // Get time labels from the active panel (or first panel with labels)
-  const activePanel = panels.find((p) => p.id === activePanelId);
-  const timeLabels = activePanel?.timeLabels || panels.find((p) => p.timeLabels)?.timeLabels || null;
+  // Compute year range (union of all panels)
+  const range = yearRange(panels.map((p) => p.timeLabels));
+  const maxSlider = range ? range.maxYear - range.minYear : 0;
+  const currentYear = range ? range.minYear + timeIndex : null;
 
   // Check if any panel is loading
   const anyLoading = panels.some((p) => p.isLoading);
@@ -151,8 +149,8 @@ export function Controls() {
         {anyLoading ? "Loading..." : "Load All Panels"}
       </button>
 
-      {/* Time Slider */}
-      {maxTimeIndex > 0 && (
+      {/* Time Slider (year-based, union of all panels) */}
+      {maxSlider > 0 && (
         <div style={{ marginBottom: "16px" }}>
           <label
             style={{
@@ -162,12 +160,16 @@ export function Controls() {
               fontWeight: 500,
             }}
           >
-            Time: {timeLabels && timeLabels[timeIndex] ? timeLabels[timeIndex].split("-")[0] : `${timeIndex} / ${maxTimeIndex}`}
+            Year: {currentYear ?? timeIndex}
           </label>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: "11px", color: "#888", marginBottom: "2px" }}>
+            <span>{range!.minYear}</span>
+            <span>{range!.maxYear}</span>
+          </div>
           <input
             type="range"
             min={0}
-            max={maxTimeIndex}
+            max={maxSlider}
             value={timeIndex}
             onChange={(e) => setTimeIndex(parseInt(e.target.value, 10))}
             style={{ width: "100%" }}

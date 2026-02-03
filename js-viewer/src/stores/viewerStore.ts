@@ -3,7 +3,7 @@ import { IcechunkStore } from "icechunk-js";
 import * as zarr from "zarrita";
 import { registerCodecs } from "../utils/codecs";
 import { parseUrlParams, EmbedConfig } from "../utils/urlParams";
-import { parseTimeUnits, decodeTimeArray, yearFromLabel, findIndexForYear } from "../utils/cftime";
+import { parseTimeUnits, decodeTimeArray, yearFromLabel, findIndexForYear, yearRange } from "../utils/cftime";
 
 // Register numcodecs codecs at module load time
 registerCodecs();
@@ -65,6 +65,7 @@ export interface Panel {
   maxTimeIndex: number;
   groupMetadata: GroupMetadata | null;
   timeLabels: string[] | null;
+  resolvedTimeIndex: number | null;
 }
 
 // Known coordinate/dimension variable names to exclude from data variables
@@ -160,6 +161,7 @@ function createEmptyPanel(): Panel {
     maxTimeIndex: 0,
     groupMetadata: null,
     timeLabels: null,
+    resolvedTimeIndex: 0,
   };
 }
 
@@ -702,14 +704,22 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
   },
 
   setTimeIndex: (index: number) => {
-    const { panels, activePanelId } = get();
-    const maxTime = Math.max(...panels.map((p) => p.maxTimeIndex), 0);
-    const clamped = Math.max(0, Math.min(index, maxTime));
-    // Derive target year from the active panel's time labels
-    const activePanel = panels.find((p) => p.id === activePanelId);
-    const timeLabels = activePanel?.timeLabels || panels.find((p) => p.timeLabels)?.timeLabels || null;
-    const targetYear = timeLabels?.[clamped] ? yearFromLabel(timeLabels[clamped]) : null;
-    set({ timeIndex: clamped, targetYear });
+    // The slider now drives targetYear directly.
+    // `index` is the year offset from minYear (slider min=0, max=maxYear-minYear).
+    const { panels } = get();
+    const range = yearRange(panels.map((p) => p.timeLabels));
+    if (!range) {
+      set({ timeIndex: index });
+      return;
+    }
+    const targetYear = range.minYear + index;
+    // Update each panel's resolvedTimeIndex (null = out of range)
+    const updatedPanels = panels.map((p) => {
+      if (!p.timeLabels || p.timeLabels.length === 0) return p;
+      const resolved = findIndexForYear(p.timeLabels, targetYear);
+      return resolved !== p.resolvedTimeIndex ? { ...p, resolvedTimeIndex: resolved } : p;
+    });
+    set({ timeIndex: index, targetYear, panels: updatedPanels });
   },
 
   setColormap: (colormap: string) => {
@@ -750,6 +760,7 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
 
   loadPanelData: async (panelId: string) => {
     const { store, panels, selectedVariable, timeIndex, targetYear, hierarchyDepth, embedConfig } = get();
+    console.log(`[Panel ${panelId}] loadPanelData called: timeIndex=${timeIndex}, targetYear=${targetYear}`);
     const panel = panels.find((p) => p.id === panelId);
 
     if (!store || !panel || !selectedVariable) {
@@ -824,10 +835,22 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
       // Resolve time index: if we have a target year and this panel has
       // time labels, find the index whose year best matches the target.
       // This aligns panels that have different time ranges.
-      let resolvedTimeIndex = Math.min(timeIndex, maxTime);
+      let resolvedTimeIndex: number | null = Math.min(timeIndex, maxTime);
       if (targetYear !== null && timeLabels && timeLabels.length > 0) {
         resolvedTimeIndex = findIndexForYear(timeLabels, targetYear);
-        console.log(`[Panel ${panelId}] Year-aligned: targetYear=${targetYear}, resolvedIndex=${resolvedTimeIndex} (${timeLabels[resolvedTimeIndex]})`);
+        console.log(`[Panel ${panelId}] Year-aligned: targetYear=${targetYear}, resolvedIndex=${resolvedTimeIndex}${resolvedTimeIndex !== null ? ` (${timeLabels[resolvedTimeIndex]})` : ' (out of range)'}`);
+      }
+
+      // If target year is out of this panel's range, store null data
+      if (resolvedTimeIndex === null) {
+        set({
+          panels: get().panels.map((p) =>
+            p.id === panelId
+              ? { ...p, currentData: null, dataShape: null, maxTimeIndex: maxTime, isLoading: false, groupMetadata: groupMeta, timeLabels, resolvedTimeIndex: null }
+              : p
+          ),
+        });
+        return;
       }
 
       let slice: (number | null)[];
@@ -877,14 +900,23 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
         variableMetadata: varMeta,
         panels: get().panels.map((p) =>
           p.id === panelId
-            ? { ...p, currentData: data, dataShape, maxTimeIndex: maxTime, isLoading: false, groupMetadata: groupMeta, timeLabels }
+            ? { ...p, currentData: data, dataShape, maxTimeIndex: maxTime, isLoading: false, groupMetadata: groupMeta, timeLabels, resolvedTimeIndex }
             : p
         ),
       };
-      if (get().targetYear === null && timeLabels && timeLabels[resolvedTimeIndex]) {
-        updates.targetYear = yearFromLabel(timeLabels[resolvedTimeIndex]);
+      if (get().targetYear === null && resolvedTimeIndex !== null && timeLabels && timeLabels[resolvedTimeIndex]) {
+        const yr = yearFromLabel(timeLabels[resolvedTimeIndex]);
+        console.log(`[Panel ${panelId}] Setting targetYear=${yr} from label=${timeLabels[resolvedTimeIndex]}`);
+        updates.targetYear = yr;
+        // Also set timeIndex as year-offset once we know the range
+        const allLabels = (updates.panels as Panel[]).map((p: Panel) => p.timeLabels);
+        const range = yearRange(allLabels);
+        if (range) {
+          updates.timeIndex = yr - range.minYear;
+        }
       }
       set(updates as Partial<ViewerState>);
+      console.log(`[Panel ${panelId}] After set: targetYear=${get().targetYear}`);
 
       if (get().autoRange) {
         computeAutoRange(get);
@@ -912,8 +944,17 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
   },
 
   loadAllPanels: async () => {
-    const { panels, loadPanelData } = get();
-    await Promise.all(panels.map((p) => loadPanelData(p.id)));
+    const { panels, activePanelId, loadPanelData } = get();
+    if (panels.length === 0) return;
+    // Load the active panel first to establish targetYear from its time
+    // labels (the slider is based on the active panel), then load the
+    // rest in parallel so year-based alignment resolves correctly.
+    const activeId = activePanelId || panels[0].id;
+    await loadPanelData(activeId);
+    const rest = panels.filter((p) => p.id !== activeId);
+    if (rest.length > 0) {
+      await Promise.all(rest.map((p) => loadPanelData(p.id)));
+    }
   },
 }));
 
