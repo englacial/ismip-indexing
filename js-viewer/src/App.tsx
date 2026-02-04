@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { Panel } from "./components/Panel";
 import { Controls } from "./components/Controls";
 import { useViewerStore } from "./stores/viewerStore";
@@ -46,12 +46,57 @@ function FloatingTimeSlider() {
 }
 
 export default function App() {
-  const { initialize, isInitializing, initError, panels, activePanelId, embedConfig } =
+  const { initialize, isInitializing, initError, panels, activePanelId, embedConfig, timeIndex, selectedVariable, loadAllPanels } =
     useViewerStore();
 
   useEffect(() => {
     initialize();
   }, [initialize]);
+
+  // Debounced auto-load on time slider change (100ms debounce for drag behavior)
+  const timeIndexRef = useRef(timeIndex);
+  const isFirstTimeRender = useRef(true);
+
+  useEffect(() => {
+    if (embedConfig?.instant_load === false) return;
+
+    if (isFirstTimeRender.current) {
+      isFirstTimeRender.current = false;
+      timeIndexRef.current = timeIndex;
+      return;
+    }
+
+    if (timeIndexRef.current === timeIndex) return;
+    timeIndexRef.current = timeIndex;
+
+    const hasLoadedData = panels.some((p) => p.currentData !== null || p.timeLabels !== null);
+    if (!hasLoadedData) return;
+
+    const timer = setTimeout(() => loadAllPanels(), 100);
+    return () => clearTimeout(timer);
+  }, [timeIndex, loadAllPanels, panels, embedConfig?.instant_load]);
+
+  // Immediate auto-load on variable change (no debounce needed for dropdown)
+  const variableRef = useRef(selectedVariable);
+  const isFirstVariableRender = useRef(true);
+
+  useEffect(() => {
+    if (embedConfig?.instant_load === false) return;
+
+    if (isFirstVariableRender.current) {
+      isFirstVariableRender.current = false;
+      variableRef.current = selectedVariable;
+      return;
+    }
+
+    if (variableRef.current === selectedVariable) return;
+    variableRef.current = selectedVariable;
+
+    const hasLoadedData = panels.some((p) => p.currentData !== null || p.timeLabels !== null);
+    if (!hasLoadedData) return;
+
+    loadAllPanels();
+  }, [selectedVariable, loadAllPanels, panels, embedConfig?.instant_load]);
 
   const controlsMode = embedConfig?.controls || "all";
   const showSidebar = controlsMode === "all";
