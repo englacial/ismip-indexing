@@ -42,4 +42,10 @@ jobs:
           rm /tmp/aws-creds.env
 
       - run: uv sync --extra dev
+
+      - name: Rebuild Lambda runtime with updated ismip6_helper
+        run: |
+          uv run lithops runtime build -f Dockerfile.lithops ismip6-icechunk -c lithops_aws.yaml
+          uv run lithops runtime deploy ismip6-icechunk -c lithops_aws.yaml
+
       - run: uv run python -m pytest tests/test_integration.py -v -s -W ignore::SyntaxWarning -m integration
