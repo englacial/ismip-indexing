@@ -579,14 +579,8 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
         );
         initialPanels = [p];
       } else if (hierarchyDepth === 2) {
-        const firstModel = models.length > 0 ? models[0] : null;
-        const firstExp = firstModel
-          ? (experiments.get(firstModel)?.[0] ?? null)
-          : null;
-        const p = createEmptyPanel();
-        p.selectedModel = firstModel;
-        p.selectedExperiment = firstExp;
-        initialPanels = [p];
+        // Don't pre-select model/experiment - let user choose
+        initialPanels = [createEmptyPanel()];
       } else {
         // For flat stores, create a panel without model/experiment
         initialPanels = [createEmptyPanel()];
@@ -672,7 +666,7 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
   },
 
   setPanelModel: (panelId: string, model: string) => {
-    const { panels, experiments } = get();
+    const { panels, experiments, hoverGridPosition, hoveredPanelId, selectedVariable, loadPanelData } = get();
     const newPanels = panels.map((p) => {
       if (p.id !== panelId) return p;
 
@@ -682,21 +676,64 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
         ? currentExp
         : modelExps[0] || null;
 
+      // Clear data when model changes
       return {
         ...p,
         selectedModel: model,
         selectedExperiment: newExp,
+        currentData: null,
+        dataShape: null,
+        timeLabels: null,
+        groupMetadata: null,
+        resolvedTimeIndex: null,
+        error: null,
       };
     });
-    set({ panels: newPanels });
+
+    const updates: Partial<ViewerState> = { panels: newPanels };
+    if (hoveredPanelId === panelId && hoverGridPosition) {
+      updates.hoverGridPosition = null;
+      updates.hoveredPanelId = null;
+    }
+    set(updates);
+
+    // Auto-load if we have a valid selection and instant_load is enabled
+    const updatedPanel = newPanels.find((p) => p.id === panelId);
+    const { embedConfig } = get();
+    if (embedConfig?.instant_load !== false && model && updatedPanel?.selectedExperiment && selectedVariable) {
+      loadPanelData(panelId);
+    }
   },
 
   setPanelExperiment: (panelId: string, experiment: string) => {
-    const { panels } = get();
+    const { panels, hoverGridPosition, hoveredPanelId, selectedVariable, loadPanelData, embedConfig } = get();
     const newPanels = panels.map((p) =>
-      p.id === panelId ? { ...p, selectedExperiment: experiment } : p
+      p.id === panelId
+        ? {
+            ...p,
+            selectedExperiment: experiment,
+            currentData: null,
+            dataShape: null,
+            timeLabels: null,
+            groupMetadata: null,
+            resolvedTimeIndex: null,
+            error: null,
+          }
+        : p
     );
-    set({ panels: newPanels });
+
+    const updates: Partial<ViewerState> = { panels: newPanels };
+    if (hoveredPanelId === panelId && hoverGridPosition) {
+      updates.hoverGridPosition = null;
+      updates.hoveredPanelId = null;
+    }
+    set(updates);
+
+    // Auto-load if we have a valid selection and instant_load is enabled
+    const updatedPanel = newPanels.find((p) => p.id === panelId);
+    if (embedConfig?.instant_load !== false && updatedPanel?.selectedModel && experiment && selectedVariable) {
+      loadPanelData(panelId);
+    }
   },
 
   setSelectedVariable: (variable: string) => {
@@ -934,6 +971,8 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
           p.id === panelId
             ? {
                 ...p,
+                currentData: null,
+                dataShape: null,
                 error: displayError,
                 isLoading: false,
               }

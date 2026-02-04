@@ -27,6 +27,8 @@ export interface EmbedConfig {
   controls?: "all" | "time" | "none";
   /** Auto-load data on init */
   autoload?: boolean;
+  /** Auto-load when dropdowns/slider change (default: true) */
+  instant_load?: boolean;
   /** icechunk store URL */
   store_url?: string;
   /** Store ref: branch name, tag name, or snapshot ID (default: "main") */
@@ -92,6 +94,13 @@ export function parseUrlParams(): EmbedConfig | null {
   const autoload = params.get("autoload");
   if (autoload === "true" || autoload === "1") {
     config.autoload = true;
+  }
+
+  const instantLoad = params.get("instant_load");
+  if (instantLoad === "false" || instantLoad === "0") {
+    config.instant_load = false;
+  } else {
+    config.instant_load = true; // default to true
   }
 
   return config;
