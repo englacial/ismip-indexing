@@ -299,3 +299,10 @@ class TestLithopsLambda:
         root = zarr.open(session.store, mode="r")
         assert "AWI_PISM1" in root
         assert "ctrl_proj_std" in root["AWI_PISM1"]
+
+        # Verify time encoding was normalized
+        time_arr = root["AWI_PISM1/ctrl_proj_std/time"]
+        assert time_arr.attrs["units"] == "days since 2000-01-01", \
+            f"Expected normalized time units, got: {time_arr.attrs.get('units')}"
+        assert time_arr.attrs["calendar"] == "proleptic_gregorian", \
+            f"Expected proleptic_gregorian calendar, got: {time_arr.attrs.get('calendar')}"

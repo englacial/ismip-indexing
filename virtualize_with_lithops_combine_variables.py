@@ -51,7 +51,9 @@ def virtualize_and_combine_batch(urls: List[str], parser: Union[HDFParser, NetCD
     # a single virtual dataset
 
     # create virtual datasets (can we speed this up in parallel if we group them? Not a prio right now)
-    loadable_variables = ['x', 'y', 'lat', 'lon', 'latitude', 'longitude', 'nv4', 'lon_bnds', 'lat_bnds']
+    # Time is included in loadable_variables so we can normalize its encoding (transform values
+    # to a standard epoch/calendar). Time arrays are small so the overhead is negligible.
+    loadable_variables = ['x', 'y', 'lat', 'lon', 'latitude', 'longitude', 'nv4', 'lon_bnds', 'lat_bnds', 'time']
 
     # virtualize and append all needed metadata (for now just the variable)
     vdatasets = []
@@ -64,11 +66,12 @@ def virtualize_and_combine_batch(urls: List[str], parser: Union[HDFParser, NetCD
             decode_times=False
         )
         # apply ismip specific fixer functions
-        # NOTE: fix_time_encoding only modifies attributes, which works with virtual datasets.
-        # normalize_time_encoding transforms actual values and can't be used with virtual datasets
-        # (ManifestArrays can't be converted to numpy). Time normalization happens at read time.
+        # fix_time_encoding cleans up malformed attributes (typos, missing calendar, etc.)
+        # normalize_time_encoding transforms values to standard epoch/calendar - this works
+        # because 'time' is in loadable_variables so it's real data, not a ManifestArray
         vds_var_fixed_time = ismip6_helper.fix_time_encoding(vds_var)
-        vds_var_fixed_grid = ismip6_helper.correct_grid_coordinates(vds_var_fixed_time, _parse_variable_from_url(url))
+        vds_var_normalized_time = ismip6_helper.normalize_time_encoding(vds_var_fixed_time)
+        vds_var_fixed_grid = ismip6_helper.correct_grid_coordinates(vds_var_normalized_time, _parse_variable_from_url(url))
         vds_preprocessed = vds_var_fixed_grid
         vdatasets.append(vds_preprocessed)
 
