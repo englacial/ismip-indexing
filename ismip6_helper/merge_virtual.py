@@ -300,10 +300,17 @@ def pad_dataset_to_union_time(
             all_vars[name] = var
 
     # Collect non-time coordinates (x, y, lat, lon, etc.)
+    # Skip ManifestArray-backed coordinates (e.g. 'bnds') -- xr.Dataset
+    # tries to build a pandas index from every coordinate, which calls
+    # to_numpy() → get_chunked_array_type() and fails without dask.
     coords = {"time": new_time}
     for name in vds.coords:
         if name != "time":
-            coords[name] = vds.coords[name]
+            coord = vds.coords[name]
+            if isinstance(coord.data, ManifestArray):
+                logger.debug("Skipping ManifestArray coordinate %s", name)
+                continue
+            coords[name] = coord
 
     return xr.Dataset(all_vars, coords=coords)
 
@@ -315,6 +322,10 @@ def _collect_datasets(datasets: list) -> xr.Dataset:
     This avoids xr.merge() which triggers xarray's chunk manager lookup for
     ManifestArray, failing in environments without dask (e.g. AWS Lambda).
     All datasets must already share compatible dimensions.
+
+    ManifestArray-backed coordinates (e.g. 'bnds') are skipped because the
+    xr.Dataset constructor tries to build pandas indexes from coordinates,
+    which calls to_numpy() and triggers get_chunked_array_type().
     """
     all_vars = {}
     all_coords = {}
@@ -323,6 +334,8 @@ def _collect_datasets(datasets: list) -> xr.Dataset:
             all_vars[name] = var
         for name, coord in ds.coords.items():
             if name not in all_coords:
+                if isinstance(coord.data, ManifestArray):
+                    continue
                 all_coords[name] = coord
 
     return xr.Dataset(all_vars, coords=all_coords)
