@@ -64,14 +64,42 @@ class TestGetRepoKwargs:
         result = virt.get_repo_kwargs(local_storage=False, cloud_backend="aws")
 
         mock_s3.assert_called_once_with(
-            bucket="ismip6-icechunk",
-            prefix="combined-variables-v3",
+            bucket="us-west-2.opendata.source.coop",
+            prefix="englacial/ismip6-combined",
             region="us-west-2",
             from_env=True,
         )
         assert result['storage'] == mock_s3.return_value
         # AWS gets higher concurrency
         assert mock_config.default.return_value.max_concurrent_requests == 10
+
+    @patch("icechunk.s3_storage")
+    @patch("icechunk.RepositoryConfig")
+    @patch("icechunk.containers_credentials")
+    def test_aws_backend_with_write_creds(self, mock_creds, mock_config, mock_s3, tmp_path):
+        import json
+        mock_config.default.return_value = MagicMock()
+        mock_creds.return_value = MagicMock()
+        mock_s3.return_value = MagicMock()
+
+        write_creds = tmp_path / "creds.json"
+        write_creds.write_text(json.dumps({
+            "aws_access_key_id": "AKID",
+            "aws_secret_access_key": "SECRET",
+            "aws_session_token": "TOKEN",
+        }))
+
+        result = virt.get_repo_kwargs(local_storage=False, cloud_backend="aws", write_creds=str(write_creds))
+
+        mock_s3.assert_called_once_with(
+            bucket="us-west-2.opendata.source.coop",
+            prefix="englacial/ismip6-combined",
+            region="us-west-2",
+            access_key_id="AKID",
+            secret_access_key="SECRET",
+            session_token="TOKEN",
+        )
+        assert result['storage'] == mock_s3.return_value
 
     @patch("icechunk.gcs_storage")
     @patch("icechunk.RepositoryConfig")

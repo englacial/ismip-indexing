@@ -1,5 +1,7 @@
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed, Future
+import logging
+import os
 import threading
 
 import lithops
@@ -21,10 +23,45 @@ zarr.config.set({
     'threading.max_workers': 10
 })
 
+logger = logging.getLogger(__name__)
+
 # AWS Lambda pricing (us-west-2): $0.0000166667 per GB-second
 LAMBDA_COST_PER_GB_SECOND = 0.0000166667
 # S3 PUT request cost: $0.005 per 1,000 requests
 S3_PUT_COST_PER_REQUEST = 0.000005
+
+# Source data bucket (public, anonymous read)
+SOURCE_BUCKET = "s3://us-west-2.opendata.source.coop/englacial/ismip6"
+
+
+def load_skip_list(path: str = "skip_list.txt") -> set:
+    """Load the skip list from a text file.
+
+    Each non-empty, non-comment line is a substring matched against URLs.
+    """
+    skip_set = set()
+    if not os.path.exists(path):
+        logger.warning("Skip list not found at %s", path)
+        return skip_set
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith('#'):
+                skip_set.add(line)
+    logger.info("Loaded %d entries from skip list %s", len(skip_set), path)
+    return skip_set
+
+
+def filter_urls_by_skip_list(urls: List[str], skip_list: set) -> tuple:
+    """Filter URLs against the skip list. Returns (kept, skipped) lists."""
+    kept = []
+    skipped = []
+    for url in urls:
+        if any(pattern in url for pattern in skip_list):
+            skipped.append(url)
+        else:
+            kept.append(url)
+    return kept, skipped
 
 
 def _parse_variable_from_url(url: str) -> str:
@@ -46,7 +83,7 @@ def infer_cloud_backend(config_file: str) -> str:
         raise ValueError(f"Cannot infer cloud backend from lithops config backend: {backend!r}")
 
 
-def virtualize_and_combine_batch(urls: List[str], parser: Union[HDFParser, NetCDF3Parser], registry: ObjectStoreRegistry) -> Dict[str, Any]:
+def virtualize_and_combine_batch(urls: List[str], registry: ObjectStoreRegistry) -> Dict[str, Any]:
     # Take a batch of datasets that belong to a single simulation (same model + experiment) and merge them into
     # a single virtual dataset
 
@@ -58,27 +95,36 @@ def virtualize_and_combine_batch(urls: List[str], parser: Union[HDFParser, NetCD
     # virtualize and append all needed metadata (for now just the variable)
     vdatasets = []
     for url in urls:
-        vds_var = open_virtual_dataset(
-            url=url,
-            parser=parser,
-            registry=registry,
-            loadable_variables=loadable_variables,
-            decode_times=False
-        )
+        # Try HDF5 (NetCDF4) first, fall back to NetCDF3. Some batches contain
+        # a mix of formats (e.g. LSCE/GRISLI2/hist_std has both HDF5 and NetCDF3 files).
+        try:
+            vds_var = open_virtual_dataset(
+                url=url,
+                parser=HDFParser(),
+                registry=registry,
+                loadable_variables=loadable_variables,
+                decode_times=False
+            )
+        except Exception:
+            vds_var = open_virtual_dataset(
+                url=url,
+                parser=NetCDF3Parser(),
+                registry=registry,
+                loadable_variables=loadable_variables,
+                decode_times=False
+            )
         # apply ismip specific fixer functions
         # fix_time_encoding cleans up malformed attributes (typos, missing calendar, etc.)
         # normalize_time_encoding transforms values to standard epoch/calendar - this works
         # because 'time' is in loadable_variables so it's real data, not a ManifestArray
         vds_var_fixed_time = ismip6_helper.fix_time_encoding(vds_var)
         vds_var_normalized_time = ismip6_helper.normalize_time_encoding(vds_var_fixed_time)
-        vds_var_fixed_grid = ismip6_helper.correct_grid_coordinates(vds_var_normalized_time, _parse_variable_from_url(url))
-        vds_preprocessed = vds_var_fixed_grid
-        vdatasets.append(vds_preprocessed)
+        vds_var_year_binned = ismip6_helper.bin_time_to_year(vds_var_normalized_time)
+        vds_var_fixed_grid = ismip6_helper.correct_grid_coordinates(vds_var_year_binned, _parse_variable_from_url(url))
+        vdatasets.append(vds_var_fixed_grid)
 
-    vds = xr.merge(vdatasets, join='override', compat='override')
-
-    # Split single-chunk contiguous arrays into per-time-slice virtual chunks
-    vds = ismip6_helper.rechunk_contiguous_time_axis(vds)
+    # Rechunk, pad to union time axis, and merge
+    vds = ismip6_helper.merge_virtual_datasets(vdatasets)
 
     return vds
 
@@ -86,15 +132,10 @@ def virtualize_and_combine_batch(urls: List[str], parser: Union[HDFParser, NetCD
 def batch_virt_func(batch: Tuple[Tuple[str], List[Dict[str, Union[str, int]]]]) -> Dict[str, Any]:
     """Wrap batch virtualization in error handling"""
     try:
-        # There are some NetCDF3 files in the mix.
-        # TODO: The better way to choose the parser would be to dynamically pick it based on a head request
-        # But for now this should do.
-        # I manually confirmed that *all* files of this model fail with the same issue.
-        parser = NetCDF3Parser() if "SICOPOLIS1" in batch['source_id'] else HDFParser()
-        bucket = "gs://ismip6"
+        bucket = SOURCE_BUCKET
         store = obstore.store.from_url(bucket, skip_signature=True)
         registry = ObjectStoreRegistry({bucket: store})
-        vds = virtualize_and_combine_batch(batch['urls'], parser, registry)
+        vds = virtualize_and_combine_batch(batch['urls'], registry)
         return {
                 'success': True,
                 'batch': batch,
@@ -218,23 +259,54 @@ def batch_write_func(batch: Tuple[Tuple[str], List[Dict[str, Union[str, int]]]],
     }
 
 
-def get_repo_kwargs(local_storage: bool = False, cloud_backend: str = "aws") -> dict:
+def _load_store_credentials(write_creds: str) -> dict:
+    """Load icechunk store write credentials from a JSON file.
+
+    Expected format:
+    {
+        "aws_access_key_id": "...",
+        "aws_secret_access_key": "...",
+        "aws_session_token": "..."
+    }
+    """
+    import json
+    with open(write_creds) as f:
+        creds = json.load(f)
+    required = ["aws_access_key_id", "aws_secret_access_key", "aws_session_token"]
+    missing = [k for k in required if k not in creds]
+    if missing:
+        raise ValueError(f"Credentials file {write_creds} missing keys: {missing}")
+    return creds
+
+
+def get_repo_kwargs(local_storage: bool = False, cloud_backend: str = "aws", write_creds: str = None) -> dict:
     """Build icechunk Repository kwargs for the given storage backend.
 
     Args:
         local_storage: Use local filesystem storage instead of cloud.
         cloud_backend: 'aws' or 'gcp'. Determines which object store and
             concurrency settings to use.
+        write_creds: Path to JSON file with source.coop store write credentials.
+            If None, credentials are read from the environment.
     """
     if local_storage:
         storage = icechunk.local_filesystem_storage("test-output/test_icechunk")
     elif cloud_backend == "aws":
-        storage = icechunk.s3_storage(
-            bucket="ismip6-icechunk",
-            prefix="combined-variables-v3",
+        storage_kwargs = dict(
+            bucket="us-west-2.opendata.source.coop",
+            prefix="englacial/ismip6-combined",
             region="us-west-2",
-            from_env=True,
         )
+        if write_creds:
+            creds = _load_store_credentials(write_creds)
+            storage_kwargs.update(
+                access_key_id=creds["aws_access_key_id"],
+                secret_access_key=creds["aws_secret_access_key"],
+                session_token=creds["aws_session_token"],
+            )
+        else:
+            storage_kwargs["from_env"] = True
+        storage = icechunk.s3_storage(**storage_kwargs)
     else:  # gcp
         storage = icechunk.gcs_storage(
             bucket="ismip6-icechunk",
@@ -245,15 +317,15 @@ def get_repo_kwargs(local_storage: bool = False, cloud_backend: str = "aws") -> 
     config = icechunk.RepositoryConfig.default()
     config.set_virtual_chunk_container(
         icechunk.VirtualChunkContainer(
-            "gs://ismip6/",
-            store=icechunk.gcs_store()
+            SOURCE_BUCKET + "/",
+            store=icechunk.s3_store(region="us-west-2", anonymous=True)
         )
     )
     # S3 handles higher concurrency than GCS
     config.max_concurrent_requests = 10 if cloud_backend == "aws" else 3
 
     credentials = icechunk.containers_credentials({
-        "gs://ismip6/": None
+        SOURCE_BUCKET + "/": None
     })
     return {
         'storage': storage,
@@ -320,6 +392,7 @@ def process_all_files(
     concurrent_writes: bool = True,
     test_model: str = None,
     test_experiment: str = None,
+    write_creds: str = None,
 ):
     """Process all files using Lithops serverless executor.
 
@@ -355,7 +428,7 @@ def process_all_files(
     grouped = files_df.groupby(['institution', 'model_name', 'experiment'])
 
     # skip groups already in the zarr store
-    repo_kwargs = get_repo_kwargs(local_storage=local_storage, cloud_backend=cloud_backend)
+    repo_kwargs = get_repo_kwargs(local_storage=local_storage, cloud_backend=cloud_backend, write_creds=write_creds)
     print(f"Opening icechunk repo at {repo_kwargs['storage']}")
     repo = icechunk.Repository.open_or_create(**repo_kwargs)
     session = repo.readonly_session(branch="main")
@@ -378,11 +451,24 @@ def process_all_files(
             (name, group.to_dict('records'))
             for name, group in grouped
         ]
+    # Load skip list
+    skip_list = load_skip_list()
+
     batches = []
+    total_skipped_files = 0
     for batch_raw in batches_raw:
         # parse batch input
         ((institution_id, source_id, experiment_id), batch_files) = batch_raw
-        urls = [bf['url'] for bf in batch_files]
+        # Transform GCS URLs to source.coop S3 URLs
+        urls = [bf['url'].replace('gs://ismip6', SOURCE_BUCKET) for bf in batch_files]
+        # Filter against skip list
+        urls, skipped = filter_urls_by_skip_list(urls, skip_list)
+        for s in skipped:
+            logger.info("Skipped (skip list): %s", s)
+        total_skipped_files += len(skipped)
+        if not urls:
+            logger.info("Batch %s_%s/%s: all files skipped", institution_id, source_id, experiment_id)
+            continue
         path = f"{institution_id}_{source_id}/{experiment_id}"
         batches.append({
             'path': path,
@@ -392,6 +478,8 @@ def process_all_files(
             'urls': urls
         })
 
+    if total_skipped_files:
+        print(f"  Skipped {total_skipped_files} files from skip list")
     print(f"Step 2/3 Complete: Created {len(batches)} batches")
 
     # Initialize Lithops executor
@@ -504,6 +592,11 @@ def process_all_files(
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
     parser = argparse.ArgumentParser(
         description="Virtualize ISMIP6 data and write to an Icechunk store via Lithops."
     )
@@ -532,6 +625,12 @@ if __name__ == "__main__":
         "--sequential-writes", action="store_true",
         help="Disable concurrent writes (use serial loop). Default is concurrent on AWS."
     )
+    parser.add_argument(
+        "--write-creds", default=None,
+        help="Path to JSON file with source.coop store write credentials. "
+             "Expected keys: aws_access_key_id, aws_secret_access_key, aws_session_token. "
+             "If not provided, credentials are read from the environment."
+    )
     args = parser.parse_args()
 
     # Infer backend from config, or default based on config filename
@@ -557,6 +656,7 @@ if __name__ == "__main__":
         concurrent_writes=concurrent_writes,
         test_model=args.test_model,
         test_experiment=args.test_experiment,
+        write_creds=args.write_creds,
     )
 
     successes = [get_id_from_batch(r['batch']) for r in result['successful']]
