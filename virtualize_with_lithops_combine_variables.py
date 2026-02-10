@@ -143,9 +143,11 @@ def _open_netcdf3_via_download(url: str, s3_store, registry: ObjectStoreRegistry
     """Open a NetCDF3 file by downloading via obstore and parsing locally.
 
     This avoids the s3fs dependency (which conflicts with Lambda's built-in
-    botocore). The file is downloaded to /tmp, parsed with NetCDF3Parser using
-    a local filesystem store in the registry, then manifest paths are rewritten
-    to point back to the original S3 URL.
+    botocore). The file is downloaded to /tmp, parsed with NetCDF3Parser,
+    then manifest paths are rewritten to point back to the original S3 URL.
+
+    Loadable variables are read with xarray's scipy engine (native Python I/O)
+    rather than through obstore's LocalStore, which has issues on Lambda.
     """
     # Extract the S3 key from the full URL
     bucket_prefix = SOURCE_BUCKET
@@ -155,26 +157,32 @@ def _open_netcdf3_via_download(url: str, s3_store, registry: ObjectStoreRegistry
     data = obstore.get(s3_store, s3_key)
     tmp_dir = tempfile.gettempdir()
     tmp_path = os.path.join(tmp_dir, os.path.basename(url))
+    file_bytes = data.bytes()
     with open(tmp_path, 'wb') as f:
-        f.write(data.bytes())
+        f.write(file_bytes)
 
     try:
-        # Add a local store to the registry so loadable_variables can be read
-        local_store = obstore.store.LocalStore(prefix=tmp_dir)
-        local_registry = ObjectStoreRegistry({
-            bucket_prefix: s3_store,
-            f'file://{tmp_dir}': local_store,
-        })
-
+        # Step 1: Create fully-virtual dataset (no data loaded through obstore).
+        # Kerchunk reads the file directly for structure/metadata.
+        # Pass loadable_variables=[] so ManifestStore never reads data chunks
+        # through the registry (obstore LocalStore has issues on Lambda).
         vds = open_virtual_dataset(
             url=f"file://{tmp_path}",
             parser=NetCDF3Parser(),
-            registry=local_registry,
-            loadable_variables=loadable_variables,
+            registry=ObjectStoreRegistry(),
+            loadable_variables=[],
             decode_times=False,
         )
 
-        # Rewrite manifest paths from local file:// to original S3 URL
+        # Step 2: Read loadable variables with xarray/scipy (native file I/O).
+        with xr.open_dataset(tmp_path, engine='scipy', decode_times=False) as real_ds:
+            vars_to_load = [v for v in loadable_variables if v in real_ds and v in vds]
+            if vars_to_load:
+                vds_keep = vds.drop_vars(vars_to_load, errors='ignore')
+                real_keep = real_ds[vars_to_load].load()
+                vds = xr.merge([real_keep, vds_keep])
+
+        # Step 3: Rewrite manifest paths from local file:// to original S3 URL
         vds = _rewrite_manifest_paths(vds, f"file://{tmp_path}", url)
     finally:
         if os.path.exists(tmp_path):
@@ -649,12 +657,13 @@ def process_all_files(
         # Pre-create all model groups in a single commit so parallel writers
         # don't conflict on root group metadata
         print(f'Pre-creating {len(by_model)} model groups...')
-        session = repo.writable_session("main")
-        store = session.store
-        root = zarr.open(store, mode="a")
-        for model_prefix in by_model:
-            root.require_group(model_prefix)
-        session.commit("Pre-create model groups for parallel writes")
+        if by_model:
+            session = repo.writable_session("main")
+            store = session.store
+            root = zarr.open(store, mode="a")
+            for model_prefix in by_model:
+                root.require_group(model_prefix)
+            session.commit("Pre-create model groups for parallel writes")
         print(f'Writing to icechunk: {len(by_model)} models in parallel, '
               f'experiments sequential within each model')
 
