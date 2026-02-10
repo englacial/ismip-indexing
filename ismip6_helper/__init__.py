@@ -46,6 +46,12 @@ from .merge_virtual import (
     merge_virtual_datasets,
 )
 
+from .variable_classification import (
+    get_state_variables,
+    get_flux_variables,
+    get_temporal_type,
+)
+
 __version__ = "0.1.0"
 
 __all__ = [
@@ -71,4 +77,8 @@ __all__ = [
     # Merge virtual
     "bin_time_to_year",
     "merge_virtual_datasets",
+    # Variable classification
+    "get_state_variables",
+    "get_flux_variables",
+    "get_temporal_type",
 ]
