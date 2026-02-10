@@ -168,16 +168,32 @@ def _open_netcdf3_via_download(url: str, s3_store, registry,
         # Build virtual dataset — bypasses ManifestStore and registry entirely
         vds = manifest_group.to_virtual_dataset()
 
+        virtual_vars = [v for v in vds.data_vars if isinstance(vds[v].data, ManifestArray)]
+        logger.info("NC3 bypass %s: virtual_vars=%s, all_vars=%s",
+                     os.path.basename(url), virtual_vars, list(vds.data_vars))
+
         # Load coordinate/loadable variables with scipy
         with xr.open_dataset(tmp_path, engine='scipy', decode_times=False) as real_ds:
             vars_to_load = [v for v in loadable_variables if v in real_ds and v in vds]
+            logger.info("NC3 bypass %s: loading %s (requested %s, in real_ds %s, in vds %s)",
+                         os.path.basename(url), vars_to_load, loadable_variables,
+                         list(real_ds.data_vars) + list(real_ds.coords), list(vds.variables))
             if vars_to_load:
                 real_keep = real_ds[vars_to_load].load()
                 vds_keep = vds.drop_vars(vars_to_load, errors='ignore')
                 vds = xr.merge([real_keep, vds_keep])
 
         # Rewrite paths: file:///tmp/foo.nc → s3://source.coop/...
-        vds = _rewrite_manifest_paths(vds, f"file://{tmp_path}", url)
+        old_path = f"file://{tmp_path}"
+        # Check manifest path format before rewrite
+        for v in vds.data_vars:
+            if isinstance(vds[v].data, ManifestArray):
+                sample = list(vds[v].data.manifest.values())[0]
+                logger.info("NC3 bypass %s: manifest path=%s, old_path=%s, match=%s",
+                             os.path.basename(url), sample["path"], old_path,
+                             old_path in sample["path"])
+                break
+        vds = _rewrite_manifest_paths(vds, old_path, url)
     finally:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
@@ -657,7 +673,10 @@ def process_all_files(
             root = zarr.open(store, mode="a")
             for model_prefix in by_model:
                 root.require_group(model_prefix)
-            session.commit("Pre-create model groups for parallel writes")
+            if session.has_uncommitted_changes:
+                session.commit("Pre-create model groups for parallel writes")
+            else:
+                print("  All model groups already exist, skipping pre-create commit")
         print(f'Writing to icechunk: {len(by_model)} models in parallel, '
               f'experiments sequential within each model')
 
