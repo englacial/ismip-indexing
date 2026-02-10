@@ -308,7 +308,7 @@ def pad_dataset_to_union_time(
         if name != "time":
             coord = vds.coords[name]
             if isinstance(coord.data, ManifestArray):
-                logger.debug("Skipping ManifestArray coordinate %s", name)
+                logger.warning("Skipping ManifestArray coordinate %s -- add to loadable_variables", name)
                 continue
             coords[name] = coord
 
