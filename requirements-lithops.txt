@@ -26,4 +26,5 @@ netcdf4==1.7.3
 cftime==1.6.5
 fsspec==2025.9.0
 gcsfs==2025.9.0
-s3fs==2025.9.0
+# s3fs intentionally omitted: conflicts with Lambda's built-in botocore.
+# NetCDF3 files are handled by downloading via obstore and parsing locally.

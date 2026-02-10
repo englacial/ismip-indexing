@@ -1,17 +1,21 @@
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed, Future
+import dataclasses
 import logging
 import os
+import tempfile
 import threading
 
 import lithops
 import icechunk
 import ismip6_helper
+import numpy as np
 import obstore
 import xarray as xr
 import yaml
 
 from virtualizarr import open_virtual_dataset
+from virtualizarr.manifests import ChunkManifest, ManifestArray
 from virtualizarr.parsers import HDFParser, NetCDF3Parser
 from virtualizarr.registry import ObjectStoreRegistry
 
@@ -83,6 +87,83 @@ def infer_cloud_backend(config_file: str) -> str:
         raise ValueError(f"Cannot infer cloud backend from lithops config backend: {backend!r}")
 
 
+def _rewrite_manifest_paths(vds: xr.Dataset, old_path: str, new_path: str) -> xr.Dataset:
+    """Rewrite manifest paths from a local file path to an S3 URL.
+
+    When NetCDF3 files are downloaded and parsed locally, the manifest entries
+    point to ``file:///tmp/...``. This replaces those paths with the original
+    S3 URL so icechunk can resolve virtual chunks at read time.
+    """
+    new_vars = {}
+    for name in vds.data_vars:
+        var = vds[name]
+        if not isinstance(var.data, ManifestArray):
+            continue
+        marr = var.data
+        entries = list(marr.manifest.values())
+        if not entries or old_path not in entries[0]["path"]:
+            continue
+        shape = marr.manifest.shape_chunk_grid
+        paths = np.empty(shape, dtype=np.dtypes.StringDType())
+        offsets = np.zeros(shape, dtype=np.dtype("uint64"))
+        lengths = np.zeros(shape, dtype=np.dtype("uint64"))
+        for idx, entry in zip(np.ndindex(shape), entries):
+            paths[idx] = entry["path"].replace(old_path, new_path)
+            offsets[idx] = entry["offset"]
+            lengths[idx] = entry["length"]
+        new_manifest = ChunkManifest.from_arrays(paths=paths, offsets=offsets, lengths=lengths, validate_paths=False)
+        new_marr = ManifestArray(metadata=marr.metadata, chunkmanifest=new_manifest)
+        new_vars[name] = xr.Variable(dims=var.dims, data=new_marr, attrs=var.attrs, encoding=var.encoding)
+    if new_vars:
+        vds = vds.assign(new_vars)
+    return vds
+
+
+def _open_netcdf3_via_download(url: str, s3_store, registry: ObjectStoreRegistry,
+                                loadable_variables: list) -> xr.Dataset:
+    """Open a NetCDF3 file by downloading via obstore and parsing locally.
+
+    This avoids the s3fs dependency (which conflicts with Lambda's built-in
+    botocore). The file is downloaded to /tmp, parsed with NetCDF3Parser using
+    a local filesystem store in the registry, then manifest paths are rewritten
+    to point back to the original S3 URL.
+    """
+    # Extract the S3 key from the full URL
+    bucket_prefix = SOURCE_BUCKET
+    s3_key = url[len(bucket_prefix) + 1:]  # strip "s3://bucket/" prefix
+
+    # Download file via obstore (works on Lambda without s3fs)
+    data = obstore.get(s3_store, s3_key)
+    tmp_dir = tempfile.gettempdir()
+    tmp_path = os.path.join(tmp_dir, os.path.basename(url))
+    with open(tmp_path, 'wb') as f:
+        f.write(data.bytes())
+
+    try:
+        # Add a local store to the registry so loadable_variables can be read
+        local_store = obstore.store.LocalStore(prefix=tmp_dir)
+        local_registry = ObjectStoreRegistry({
+            bucket_prefix: s3_store,
+            f'file://{tmp_dir}': local_store,
+        })
+
+        vds = open_virtual_dataset(
+            url=tmp_path,
+            parser=NetCDF3Parser(),
+            registry=local_registry,
+            loadable_variables=loadable_variables,
+            decode_times=False,
+        )
+
+        # Rewrite manifest paths from local file:// to original S3 URL
+        vds = _rewrite_manifest_paths(vds, f"file://{tmp_path}", url)
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+    return vds
+
+
 def virtualize_and_combine_batch(urls: List[str], registry: ObjectStoreRegistry) -> Dict[str, Any]:
     # Take a batch of datasets that belong to a single simulation (same model + experiment) and merge them into
     # a single virtual dataset
@@ -92,11 +173,16 @@ def virtualize_and_combine_batch(urls: List[str], registry: ObjectStoreRegistry)
     # to a standard epoch/calendar). Time arrays are small so the overhead is negligible.
     loadable_variables = ['x', 'y', 'lat', 'lon', 'latitude', 'longitude', 'nv4', 'lon_bnds', 'lat_bnds', 'time', 'bnds']
 
+    # S3 store for downloading NetCDF3 files (obstore works without s3fs)
+    s3_store = obstore.store.from_url(SOURCE_BUCKET, skip_signature=True)
+
     # virtualize and append all needed metadata (for now just the variable)
     vdatasets = []
     for url in urls:
         # Try HDF5 (NetCDF4) first, fall back to NetCDF3. Some batches contain
         # a mix of formats (e.g. LSCE/GRISLI2/hist_std has both HDF5 and NetCDF3 files).
+        # NetCDF3 fallback downloads the file via obstore and parses locally,
+        # because s3fs conflicts with Lambda's built-in botocore.
         try:
             vds_var = open_virtual_dataset(
                 url=url,
@@ -106,13 +192,7 @@ def virtualize_and_combine_batch(urls: List[str], registry: ObjectStoreRegistry)
                 decode_times=False
             )
         except Exception:
-            vds_var = open_virtual_dataset(
-                url=url,
-                parser=NetCDF3Parser(),
-                registry=registry,
-                loadable_variables=loadable_variables,
-                decode_times=False
-            )
+            vds_var = _open_netcdf3_via_download(url, s3_store, registry, loadable_variables)
         # apply ismip specific fixer functions
         # fix_time_encoding cleans up malformed attributes (typos, missing calendar, etc.)
         # normalize_time_encoding transforms values to standard epoch/calendar - this works
