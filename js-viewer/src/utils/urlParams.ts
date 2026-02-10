@@ -35,6 +35,8 @@ export interface EmbedConfig {
   store_ref?: string;
   /** Override group path within store (e.g., "model/experiment" or just "experiment") */
   group_path?: string;
+  /** Data view: "combined" (default), "state", or "flux" */
+  data_view?: "combined" | "state" | "flux";
   /** Grid parameter overrides (fallback if coordinate arrays not found) */
   grid_width?: number;
   grid_height?: number;
@@ -69,6 +71,11 @@ export function parseUrlParams(): EmbedConfig | null {
   config.store_url = str("store_url");
   config.store_ref = str("store_ref");
   config.group_path = str("group_path");
+
+  const dataView = str("data_view");
+  if (dataView === "combined" || dataView === "state" || dataView === "flux") {
+    config.data_view = dataView;
+  }
 
   // Grid overrides
   config.grid_width = int("grid_width");

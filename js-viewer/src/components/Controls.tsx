@@ -1,7 +1,13 @@
-import { useViewerStore } from "../stores/viewerStore";
+import { useViewerStore, type DataView } from "../stores/viewerStore";
 import { COLORMAP_NAMES } from "../utils/colormap";
 import { formatValue } from "../utils/format";
 import { yearRange } from "../utils/cftime";
+
+const DATA_VIEWS: { value: DataView; label: string }[] = [
+  { value: "combined", label: "Combined" },
+  { value: "state", label: "State" },
+  { value: "flux", label: "Flux" },
+];
 
 export function Controls() {
   const {
@@ -14,11 +20,14 @@ export function Controls() {
     vmax,
     autoRange,
     variableMetadata,
+    dataView,
+    isInitializing,
     setSelectedVariable,
     setTimeIndex,
     setColormap,
     setColorRange,
     setAutoRange,
+    setDataView,
     addPanel,
     loadAllPanels,
   } = useViewerStore();
@@ -52,6 +61,46 @@ export function Controls() {
       <h2 style={{ margin: "0 0 16px 0", fontSize: "18px", fontWeight: 600 }}>
         ISMIP6 Comparison
       </h2>
+
+      {/* Data View Toggle */}
+      <div style={{ marginBottom: "16px" }}>
+        <label
+          style={{
+            display: "block",
+            marginBottom: "4px",
+            fontSize: "13px",
+            fontWeight: 500,
+          }}
+        >
+          Data View
+        </label>
+        <div style={{ display: "flex", borderRadius: "4px", overflow: "hidden", border: "1px solid #ccc" }}>
+          {DATA_VIEWS.map((dv) => (
+            <button
+              key={dv.value}
+              onClick={() => setDataView(dv.value)}
+              disabled={isInitializing}
+              style={{
+                flex: 1,
+                padding: "6px 0",
+                fontSize: "12px",
+                fontWeight: dataView === dv.value ? 600 : 400,
+                backgroundColor: dataView === dv.value ? "#1976d2" : "#fff",
+                color: dataView === dv.value ? "#fff" : "#333",
+                border: "none",
+                borderRight: dv.value !== "flux" ? "1px solid #ccc" : "none",
+                cursor: isInitializing ? "not-allowed" : "pointer",
+                opacity: isInitializing ? 0.6 : 1,
+              }}
+            >
+              {dv.label}
+            </button>
+          ))}
+        </div>
+        <div style={{ fontSize: "11px", color: "#666", marginTop: "4px" }}>
+          Combined: year-binned, all vars. State/Flux: original timestamps.
+        </div>
+      </div>
 
       {/* Panel Management */}
       <div style={{ marginBottom: "16px" }}>

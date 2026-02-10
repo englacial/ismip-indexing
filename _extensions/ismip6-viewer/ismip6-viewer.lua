@@ -29,7 +29,7 @@ local DEFAULT_URL = "https://models.englacial.org/"
 local PARAM_KEYS = {
   "model", "experiment", "variable", "time",
   "colormap", "vmin", "vmax", "panels", "controls",
-  "store_url", "store_ref", "group_path",
+  "store_url", "store_ref", "group_path", "data_view",
   "grid_width", "grid_height", "cell_size", "x_min", "y_min"
 }
 

@@ -65,7 +65,7 @@ class TestGetRepoKwargs:
 
         mock_s3.assert_called_once_with(
             bucket="us-west-2.opendata.source.coop",
-            prefix="englacial/ismip6-combined",
+            prefix="englacial/ismip6/icechunk-ais",
             region="us-west-2",
             from_env=True,
         )
@@ -93,7 +93,7 @@ class TestGetRepoKwargs:
 
         mock_s3.assert_called_once_with(
             bucket="us-west-2.opendata.source.coop",
-            prefix="englacial/ismip6-combined",
+            prefix="englacial/ismip6/icechunk-ais",
             region="us-west-2",
             access_key_id="AKID",
             secret_access_key="SECRET",
@@ -150,8 +150,8 @@ class TestCLIParsing:
         parser.add_argument("--test-model", default=None)
         parser.add_argument("--test-experiment", default=None)
         parser.add_argument("--sequential-writes", action="store_true")
-        parser.add_argument("--store-type", default="combined",
-                            choices=["combined", "state", "flux"])
+        parser.add_argument("--store-type", default="all",
+                            choices=["all", "combined", "state", "flux"])
         return parser.parse_args(args_list)
 
     def test_defaults(self):
@@ -162,7 +162,7 @@ class TestCLIParsing:
         assert args.test_model is None
         assert args.test_experiment is None
         assert args.sequential_writes is False
-        assert args.store_type == "combined"
+        assert args.store_type == "all"
 
     def test_gcp_config(self):
         args = self._parse(["--config", "lithops_gcp.yaml"])
@@ -182,6 +182,10 @@ class TestCLIParsing:
         assert args.local_storage is True
         assert args.local_execution is True
 
+    def test_store_type_all(self):
+        args = self._parse(["--store-type", "all"])
+        assert args.store_type == "all"
+
     def test_store_type_state(self):
         args = self._parse(["--store-type", "state"])
         assert args.store_type == "state"
@@ -189,6 +193,10 @@ class TestCLIParsing:
     def test_store_type_flux(self):
         args = self._parse(["--store-type", "flux"])
         assert args.store_type == "flux"
+
+    def test_store_type_combined(self):
+        args = self._parse(["--store-type", "combined"])
+        assert args.store_type == "combined"
 
     def test_store_type_invalid(self):
         with pytest.raises(SystemExit):
@@ -270,21 +278,29 @@ class TestStoreTypeConfig:
     def test_has_all_three_entries(self):
         assert set(virt.STORE_TYPE_CONFIG.keys()) == {"combined", "state", "flux"}
 
+    def test_unified_prefix(self):
+        """All store types share a single unified prefix."""
+        for key in ("combined", "state", "flux"):
+            assert virt.STORE_TYPE_CONFIG[key]["prefix"] == virt.UNIFIED_STORE_PREFIX
+
     def test_combined_config(self):
         cfg = virt.STORE_TYPE_CONFIG["combined"]
-        assert cfg["prefix"] == "englacial/ismip6-combined"
+        assert cfg["prefix"] == "englacial/ismip6/icechunk-ais"
+        assert cfg["group_prefix"] == "combined"
         assert cfg["bin_time"] is True
         assert cfg["filter"] is None
 
     def test_state_config(self):
         cfg = virt.STORE_TYPE_CONFIG["state"]
-        assert cfg["prefix"] == "englacial/ismip6-state"
+        assert cfg["prefix"] == "englacial/ismip6/icechunk-ais"
+        assert cfg["group_prefix"] == "state"
         assert cfg["bin_time"] is False
         assert cfg["filter"] == "ST"
 
     def test_flux_config(self):
         cfg = virt.STORE_TYPE_CONFIG["flux"]
-        assert cfg["prefix"] == "englacial/ismip6-flux"
+        assert cfg["prefix"] == "englacial/ismip6/icechunk-ais"
+        assert cfg["group_prefix"] == "flux"
         assert cfg["bin_time"] is False
         assert cfg["filter"] == "FL"
 
@@ -293,45 +309,14 @@ class TestStoreTypeConfig:
 # get_repo_kwargs with store_type
 # ---------------------------------------------------------------------------
 
-class TestGetRepoKwargsStoreType:
-    @patch("icechunk.s3_storage")
-    @patch("icechunk.RepositoryConfig")
-    @patch("icechunk.containers_credentials")
-    def test_state_prefix(self, mock_creds, mock_config, mock_s3):
-        mock_config.default.return_value = MagicMock()
-        mock_creds.return_value = MagicMock()
-        mock_s3.return_value = MagicMock()
-
-        virt.get_repo_kwargs(local_storage=False, cloud_backend="aws", store_type="state")
-
-        mock_s3.assert_called_once_with(
-            bucket="us-west-2.opendata.source.coop",
-            prefix="englacial/ismip6-state",
-            region="us-west-2",
-            from_env=True,
-        )
+class TestGetRepoKwargsUnifiedPrefix:
+    """All store types now share a single repo, so get_repo_kwargs always uses the
+    unified prefix regardless of which store type will be written."""
 
     @patch("icechunk.s3_storage")
     @patch("icechunk.RepositoryConfig")
     @patch("icechunk.containers_credentials")
-    def test_flux_prefix(self, mock_creds, mock_config, mock_s3):
-        mock_config.default.return_value = MagicMock()
-        mock_creds.return_value = MagicMock()
-        mock_s3.return_value = MagicMock()
-
-        virt.get_repo_kwargs(local_storage=False, cloud_backend="aws", store_type="flux")
-
-        mock_s3.assert_called_once_with(
-            bucket="us-west-2.opendata.source.coop",
-            prefix="englacial/ismip6-flux",
-            region="us-west-2",
-            from_env=True,
-        )
-
-    @patch("icechunk.s3_storage")
-    @patch("icechunk.RepositoryConfig")
-    @patch("icechunk.containers_credentials")
-    def test_combined_prefix_default(self, mock_creds, mock_config, mock_s3):
+    def test_always_uses_unified_prefix(self, mock_creds, mock_config, mock_s3):
         mock_config.default.return_value = MagicMock()
         mock_creds.return_value = MagicMock()
         mock_s3.return_value = MagicMock()
@@ -340,7 +325,20 @@ class TestGetRepoKwargsStoreType:
 
         mock_s3.assert_called_once_with(
             bucket="us-west-2.opendata.source.coop",
-            prefix="englacial/ismip6-combined",
+            prefix="englacial/ismip6/icechunk-ais",
             region="us-west-2",
             from_env=True,
         )
+
+    @patch("icechunk.s3_storage")
+    @patch("icechunk.RepositoryConfig")
+    @patch("icechunk.containers_credentials")
+    def test_no_store_type_param(self, mock_creds, mock_config, mock_s3):
+        """get_repo_kwargs no longer accepts store_type."""
+        mock_config.default.return_value = MagicMock()
+        mock_creds.return_value = MagicMock()
+        mock_s3.return_value = MagicMock()
+
+        import inspect
+        sig = inspect.signature(virt.get_repo_kwargs)
+        assert "store_type" not in sig.parameters

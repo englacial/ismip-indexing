@@ -92,6 +92,10 @@ const ismip6ViewerDirective = {
       type: String,
       doc: 'Override group path within store (e.g., "model/experiment")',
     },
+    data_view: {
+      type: String,
+      doc: 'Data view: "combined" (default), "state", or "flux"',
+    },
     grid_width: {
       type: Number,
       doc: 'Grid width in cells (fallback if coordinate arrays not found)',
@@ -143,6 +147,7 @@ const ismip6ViewerDirective = {
     if (options.store_url) params.set('store_url', options.store_url);
     if (options.store_ref) params.set('store_ref', options.store_ref);
     if (options.group_path) params.set('group_path', options.group_path);
+    if (options.data_view) params.set('data_view', options.data_view);
     if (options.grid_width !== undefined) params.set('grid_width', options.grid_width.toString());
     if (options.grid_height !== undefined) params.set('grid_height', options.grid_height.toString());
     if (options.cell_size !== undefined) params.set('cell_size', options.cell_size.toString());

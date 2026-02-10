@@ -37,23 +37,14 @@ S3_PUT_COST_PER_REQUEST = 0.000005
 # Source data bucket (public, anonymous read)
 SOURCE_BUCKET = "s3://us-west-2.opendata.source.coop/englacial/ismip6"
 
-# Store type configurations: controls S3 prefix, time binning, and variable filtering
+# Unified store prefix: all store types live under a single icechunk repo
+UNIFIED_STORE_PREFIX = "englacial/ismip6/icechunk-ais"
+
+# Store type configurations: controls group prefix, time binning, and variable filtering
 STORE_TYPE_CONFIG = {
-    "combined": {
-        "prefix": "englacial/ismip6-combined",
-        "bin_time": True,
-        "filter": None,
-    },
-    "state": {
-        "prefix": "englacial/ismip6-state",
-        "bin_time": False,
-        "filter": "ST",
-    },
-    "flux": {
-        "prefix": "englacial/ismip6-flux",
-        "bin_time": False,
-        "filter": "FL",
-    },
+    "combined": {"prefix": UNIFIED_STORE_PREFIX, "group_prefix": "combined", "bin_time": True,  "filter": None},
+    "state":    {"prefix": UNIFIED_STORE_PREFIX, "group_prefix": "state",    "bin_time": False, "filter": "ST"},
+    "flux":     {"prefix": UNIFIED_STORE_PREFIX, "group_prefix": "flux",     "bin_time": False, "filter": "FL"},
 }
 
 
@@ -398,8 +389,10 @@ def _load_store_credentials(write_creds: str) -> dict:
     return creds
 
 
-def get_repo_kwargs(local_storage: bool = False, cloud_backend: str = "aws", write_creds: str = None, store_type: str = "combined") -> dict:
+def get_repo_kwargs(local_storage: bool = False, cloud_backend: str = "aws", write_creds: str = None) -> dict:
     """Build icechunk Repository kwargs for the given storage backend.
+
+    All store types share a single unified icechunk repo at UNIFIED_STORE_PREFIX.
 
     Args:
         local_storage: Use local filesystem storage instead of cloud.
@@ -407,9 +400,8 @@ def get_repo_kwargs(local_storage: bool = False, cloud_backend: str = "aws", wri
             concurrency settings to use.
         write_creds: Path to JSON file with source.coop store write credentials.
             If None, credentials are read from the environment.
-        store_type: One of 'combined', 'state', 'flux'. Controls the S3 prefix.
     """
-    s3_prefix = STORE_TYPE_CONFIG[store_type]["prefix"]
+    s3_prefix = UNIFIED_STORE_PREFIX
     if local_storage:
         storage = icechunk.local_filesystem_storage("test-output/test_icechunk")
     elif cloud_backend == "aws":
@@ -560,17 +552,19 @@ def process_all_files(
     grouped = files_df.groupby(['institution', 'model_name', 'experiment'])
 
     # skip groups already in the zarr store
-    repo_kwargs = get_repo_kwargs(local_storage=local_storage, cloud_backend=cloud_backend, write_creds=write_creds, store_type=store_type)
+    repo_kwargs = get_repo_kwargs(local_storage=local_storage, cloud_backend=cloud_backend, write_creds=write_creds)
     print(f"Opening icechunk repo at {repo_kwargs['storage']}")
     repo = icechunk.Repository.open_or_create(**repo_kwargs)
     session = repo.readonly_session(branch="main")
+    group_prefix = store_config["group_prefix"]
+
     try:
         root = zarr.open(session.store, mode='r')
         print('Found groups in the store. Skipping all existing groups.')
         print(root.tree(level=1))
         batches_raw = []
         for name, group in grouped:
-            path = f"{name[0]}_{name[1]}/{name[2]}"
+            path = f"{group_prefix}/{name[0]}_{name[1]}/{name[2]}"
             if path not in root:
                 print(f'{path} does not exist')
                 batches_raw.append((name, group.to_dict('records')))
@@ -601,7 +595,7 @@ def process_all_files(
         if not urls:
             logger.info("Batch %s_%s/%s: all files skipped", institution_id, source_id, experiment_id)
             continue
-        path = f"{institution_id}_{source_id}/{experiment_id}"
+        path = f"{group_prefix}/{institution_id}_{source_id}/{experiment_id}"
         batches.append({
             'path': path,
             'experiment_id': experiment_id,
@@ -658,21 +652,24 @@ def process_all_files(
     writing_results = []
     if concurrent_writes:
         # Group successful results by model prefix
+        # Paths are now "group_prefix/Model_Name/experiment", so model is at index 1
         from collections import defaultdict
         by_model = defaultdict(list)
         for r in successful_results:
-            model_prefix = r['batch']['path'].split('/')[0]
+            model_prefix = r['batch']['path'].split('/')[1]
             by_model[model_prefix].append(r)
 
-        # Pre-create all model groups in a single commit so parallel writers
-        # don't conflict on root group metadata
-        print(f'Pre-creating {len(by_model)} model groups...')
+        # Pre-create the top-level group (combined/, state/, or flux/) and all
+        # model groups in a single commit so parallel writers don't conflict
+        # on root group metadata
+        print(f'Pre-creating top-level group and {len(by_model)} model groups...')
         if by_model:
             session = repo.writable_session("main")
             store = session.store
             root = zarr.open(store, mode="a")
-            for model_prefix in by_model:
-                root.require_group(model_prefix)
+            root.require_group(group_prefix)
+            for model_name in by_model:
+                root.require_group(f"{group_prefix}/{model_name}")
             if session.has_uncommitted_changes:
                 session.commit("Pre-create model groups for parallel writes")
             else:
@@ -784,10 +781,11 @@ if __name__ == "__main__":
              "If not provided, credentials are read from the environment."
     )
     parser.add_argument(
-        "--store-type", default="combined",
-        choices=["combined", "state", "flux"],
-        help="Type of icechunk store to build: 'combined' (all variables, year-binned), "
-             "'state' (ST variables only), or 'flux' (FL variables only). Default: combined."
+        "--store-type", default="all",
+        choices=["all", "combined", "state", "flux"],
+        help="Type of icechunk store to build: 'all' (runs combined, state, and flux sequentially), "
+             "'combined' (all variables, year-binned), 'state' (ST variables only), or "
+             "'flux' (FL variables only). Default: all."
     )
     args = parser.parse_args()
 
@@ -806,28 +804,35 @@ if __name__ == "__main__":
               "(GCS rate-limits ref file mutations). Pass --sequential-writes=false to override.")
         concurrent_writes = False
 
-    result = process_all_files(
-        local_storage=args.local_storage,
-        local_execution=local_execution,
-        config_file=args.config,
-        cloud_backend=cloud_backend,
-        concurrent_writes=concurrent_writes,
-        test_model=args.test_model,
-        test_experiment=args.test_experiment,
-        write_creds=args.write_creds,
-        store_type=args.store_type,
-    )
+    if args.store_type == "all":
+        store_types = ["combined", "state", "flux"]
+    else:
+        store_types = [args.store_type]
 
-    successes = [get_id_from_batch(r['batch']) for r in result['successful']]
-    print(f"\nSuccessful: {successes}")
+    for st in store_types:
+        print(f"\n{'='*60}\nProcessing store type: {st}\n{'='*60}")
+        result = process_all_files(
+            local_storage=args.local_storage,
+            local_execution=local_execution,
+            config_file=args.config,
+            cloud_backend=cloud_backend,
+            concurrent_writes=concurrent_writes,
+            test_model=args.test_model,
+            test_experiment=args.test_experiment,
+            write_creds=args.write_creds,
+            store_type=st,
+        )
 
-    if result['failed']:
-        print("\nFailures by error:")
-        fails_by_error = {}
-        for r in result['failed']:
-            err = r.get('error', 'unknown')
-            fails_by_error.setdefault(err, []).append(get_id_from_batch(r['batch']))
-        for err, ids in fails_by_error.items():
-            print(f"  {err[:200]}")
-            for batch_id in ids:
-                print(f"    - {batch_id}")
+        successes = [get_id_from_batch(r['batch']) for r in result['successful']]
+        print(f"\nSuccessful: {successes}")
+
+        if result['failed']:
+            print("\nFailures by error:")
+            fails_by_error = {}
+            for r in result['failed']:
+                err = r.get('error', 'unknown')
+                fails_by_error.setdefault(err, []).append(get_id_from_batch(r['batch']))
+            for err, ids in fails_by_error.items():
+                print(f"  {err[:200]}")
+                for batch_id in ids:
+                    print(f"    - {batch_id}")
