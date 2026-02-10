@@ -562,8 +562,23 @@ def process_all_files(
         print(f"  Skipped {total_skipped_files} files from skip list")
     print(f"Step 2/3 Complete: Created {len(batches)} batches")
 
+    # Increase boto read timeout for downloading large result objects.
+    # NetCDF3 batches return bigger virtual datasets that can exceed the 60s default.
+    import botocore.config
+    os.environ.setdefault('AWS_MAX_ATTEMPTS', '5')
+    boto_config = botocore.config.Config(read_timeout=300, retries={'max_attempts': 5})
+
     # Initialize Lithops executor
     fexec = lithops.FunctionExecutor(config_file=config_file)
+
+    # Patch the storage backend's S3 client to use the extended timeout
+    if hasattr(fexec, 'internal_storage') and hasattr(fexec.internal_storage, 'storage'):
+        storage = fexec.internal_storage.storage
+        if hasattr(storage, 'storage_handler') and hasattr(storage.storage_handler, 's3_client'):
+            import boto3
+            storage.storage_handler.s3_client = boto3.client(
+                's3', region_name='us-west-2', config=boto_config,
+            )
 
     # Step 3: Virtualize files with maximum concurrency
     virt_futures = fexec.map(batch_virt_func, [{'batch': b} for b in batches])
