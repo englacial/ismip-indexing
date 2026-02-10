@@ -90,7 +90,7 @@ def virtualize_and_combine_batch(urls: List[str], registry: ObjectStoreRegistry)
     # create virtual datasets (can we speed this up in parallel if we group them? Not a prio right now)
     # Time is included in loadable_variables so we can normalize its encoding (transform values
     # to a standard epoch/calendar). Time arrays are small so the overhead is negligible.
-    loadable_variables = ['x', 'y', 'lat', 'lon', 'latitude', 'longitude', 'nv4', 'lon_bnds', 'lat_bnds', 'time']
+    loadable_variables = ['x', 'y', 'lat', 'lon', 'latitude', 'longitude', 'nv4', 'lon_bnds', 'lat_bnds', 'time', 'bnds']
 
     # virtualize and append all needed metadata (for now just the variable)
     vdatasets = []
