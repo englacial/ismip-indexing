@@ -41,6 +41,11 @@ from .rechunk_virtual import (
     rechunk_contiguous_time_axis,
 )
 
+from .merge_virtual import (
+    bin_time_to_year,
+    merge_virtual_datasets,
+)
+
 __version__ = "0.1.0"
 
 __all__ = [
@@ -63,4 +68,7 @@ __all__ = [
     "STANDARD_TIME_CALENDAR",
     # Rechunking
     "rechunk_contiguous_time_axis",
+    # Merge virtual
+    "bin_time_to_year",
+    "merge_virtual_datasets",
 ]
