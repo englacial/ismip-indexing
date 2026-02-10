@@ -307,3 +307,64 @@ class TestLithopsLambda:
             f"Expected normalized time units, got: {time_arr.attrs.get('units')}"
         assert time_arr.attrs["calendar"] == "proleptic_gregorian", \
             f"Expected proleptic_gregorian calendar, got: {time_arr.attrs.get('calendar')}"
+
+    def test_virtualize_netcdf3_on_lambda(self, test_prefix):
+        """Virtualize a real NetCDF3 file (SICOPOLIS1) on Lambda via the kerchunk bypass.
+
+        This catches obstore/LocalStore failures that only manifest in Lambda's
+        async runtime. Uses two files from ILTS_PIK_SICOPOLIS1/hist_std which
+        are known NetCDF3 format.
+        """
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+        import virtualize_with_lithops_combine_variables as virt
+        from virtualizarr.manifests import ManifestArray
+        import lithops
+
+        batch = {
+            "path": "ILTS_PIK_SICOPOLIS1/hist_std",
+            "experiment_id": "hist_std",
+            "institution_id": "ILTS_PIK",
+            "source_id": "SICOPOLIS1",
+            "urls": [
+                "s3://us-west-2.opendata.source.coop/englacial/ismip6/Projection-AIS/ILTS_PIK/SICOPOLIS1/hist_std/acabf_AIS_ILTS_PIK_SICOPOLIS_hist_std.nc",
+                "s3://us-west-2.opendata.source.coop/englacial/ismip6/Projection-AIS/ILTS_PIK/SICOPOLIS1/hist_std/lithk_AIS_ILTS_PIK_SICOPOLIS_hist_std.nc",
+            ],
+            "bin_time": True,
+        }
+
+        fexec = lithops.FunctionExecutor(config_file="lithops_aws.yaml")
+        futures = fexec.map(virt.batch_virt_func, [{"batch": batch}])
+        results = fexec.get_result(futures)
+        _print_lambda_cost(futures, "test_virtualize_netcdf3_on_lambda")
+        fexec.clean()
+
+        assert len(results) == 1
+        r = results[0]
+        assert r["success"] is True, f"NetCDF3 virtualization failed: {r.get('error', 'unknown')}"
+
+        vds = r["virtual_dataset"]
+        # Should have the data variables we requested
+        assert "acabf" in vds or "lithk" in vds, f"Missing data vars, got: {list(vds.data_vars)}"
+
+        # Data vars should be virtual (ManifestArray), not loaded
+        for var_name in ["acabf", "lithk"]:
+            if var_name in vds.data_vars:
+                assert isinstance(vds[var_name].data, ManifestArray), \
+                    f"{var_name} should be ManifestArray, got {type(vds[var_name].data)}"
+
+        # Manifest paths should point to S3, not file:///tmp
+        for var_name in vds.data_vars:
+            if not isinstance(vds[var_name].data, ManifestArray):
+                continue
+            entry = list(vds[var_name].data.manifest.values())[0]
+            assert entry["path"].startswith("s3://"), \
+                f"Manifest path not rewritten to S3: {entry['path']}"
+            assert "/tmp/" not in entry["path"], \
+                f"Manifest path still references /tmp: {entry['path']}"
+
+        # Coords should be real numpy arrays (loaded via scipy), not virtual
+        for coord in ["time", "x", "y"]:
+            if coord in vds.coords:
+                assert not isinstance(vds[coord].data, ManifestArray), \
+                    f"Coord {coord} should be loaded, not ManifestArray"
