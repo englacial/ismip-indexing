@@ -5,11 +5,14 @@ This module provides functions to fix common time encoding issues in ISMIP6 file
 to ensure CF-compliance and compatibility with xarray's time decoding.
 """
 
+import logging
 import re
 import warnings
 import numpy as np
 import xarray as xr
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 # Standard encoding that all time arrays are normalized to.
 # proleptic_gregorian is the default for numpy datetime64 and works
@@ -179,6 +182,9 @@ def normalize_time_encoding(
                 d = 1
             if m < 1:
                 m = 1
+            if m > 12:
+                y += (m - 1) // 12
+                m = (m - 1) % 12 + 1
             dates.append(cftime.datetime(y, m, d, calendar=target_calendar))
     else:
         # Detect mislabeled calendars: if the calendar claims to be
@@ -203,6 +209,8 @@ def normalize_time_encoding(
                 calendar=decode_calendar,
             )
         except Exception as e:
+            logger.warning("Failed to decode time (units=%r, calendar=%r): %s",
+                           original_units, decode_calendar, e)
             if verbose:
                 print(f"  - Failed to decode time: {e}")
             return ds
@@ -216,16 +224,24 @@ def normalize_time_encoding(
                 cftime.datetime(dt.year, dt.month, dt.day, calendar=target_calendar)
             )
         except ValueError:
-            # Handle impossible dates (e.g. Feb 30 from 360_day calendar)
-            # Clamp day to valid range for the target calendar month
+            # Handle impossible dates from non-standard calendars:
+            # - Invalid month (e.g. month 14) → roll into next year
+            # - Invalid day (e.g. Feb 30 from 360_day) → clamp to month max
             import calendar as cal_mod
+            month = dt.month
+            year = dt.year
+            if month > 12:
+                year += (month - 1) // 12
+                month = (month - 1) % 12 + 1
+            elif month < 1:
+                month = 1
             if target_calendar in ('proleptic_gregorian', 'standard', 'gregorian'):
-                max_day = cal_mod.monthrange(dt.year, dt.month)[1]
+                max_day = cal_mod.monthrange(year, month)[1]
             else:
                 max_day = 28  # safe fallback
-            clamped_day = min(dt.day, max_day)
+            clamped_day = min(max(dt.day, 1), max_day)
             target_dates.append(
-                cftime.datetime(dt.year, dt.month, clamped_day, calendar=target_calendar)
+                cftime.datetime(year, month, clamped_day, calendar=target_calendar)
             )
 
     new_values = cftime.date2num(
