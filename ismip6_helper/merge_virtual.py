@@ -355,5 +355,19 @@ def merge_virtual_datasets(vdatasets: list) -> xr.Dataset:
     # Step 4: pad each dataset to match the union time axis
     padded = [pad_dataset_to_union_time(ds, union_time) for ds in rechunked]
 
-    # Step 5: merge (safe now)
-    return xr.merge(padded, join='override', compat='override')
+    # Step 5: combine into a single dataset.
+    # We avoid xr.merge() here because it triggers xarray's chunk manager
+    # lookup for ManifestArray, which fails in environments where entry
+    # point discovery is broken (e.g. AWS Lambda). Since all datasets are
+    # already padded to the same union time axis, we can directly collect
+    # variables and coordinates without any alignment.
+    all_vars = {}
+    all_coords = {}
+    for ds in padded:
+        for name, var in ds.data_vars.items():
+            all_vars[name] = var
+        for name, coord in ds.coords.items():
+            if name not in all_coords:
+                all_coords[name] = coord
+
+    return xr.Dataset(all_vars, coords=all_coords)
