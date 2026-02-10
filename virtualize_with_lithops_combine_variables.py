@@ -148,7 +148,7 @@ def _open_netcdf3_via_download(url: str, s3_store, registry: ObjectStoreRegistry
         })
 
         vds = open_virtual_dataset(
-            url=tmp_path,
+            url=f"file://{tmp_path}",
             parser=NetCDF3Parser(),
             registry=local_registry,
             loadable_variables=loadable_variables,
