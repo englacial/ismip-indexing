@@ -308,6 +308,26 @@ def pad_dataset_to_union_time(
     return xr.Dataset(all_vars, coords=coords)
 
 
+def _collect_datasets(datasets: list) -> xr.Dataset:
+    """
+    Combine multiple datasets by directly collecting variables and coordinates.
+
+    This avoids xr.merge() which triggers xarray's chunk manager lookup for
+    ManifestArray, failing in environments without dask (e.g. AWS Lambda).
+    All datasets must already share compatible dimensions.
+    """
+    all_vars = {}
+    all_coords = {}
+    for ds in datasets:
+        for name, var in ds.data_vars.items():
+            all_vars[name] = var
+        for name, coord in ds.coords.items():
+            if name not in all_coords:
+                all_coords[name] = coord
+
+    return xr.Dataset(all_vars, coords=all_coords)
+
+
 def merge_virtual_datasets(vdatasets: list) -> xr.Dataset:
     """
     Merge virtual datasets with potentially different time axes.
@@ -318,7 +338,7 @@ def merge_virtual_datasets(vdatasets: list) -> xr.Dataset:
     2. Compute union time axis
     3. If all datasets share the same axis -> fast path, skip padding
     4. Otherwise, pad each dataset to the union axis
-    5. xr.merge (safe because axes now match)
+    5. Collect variables into a single dataset
 
     Parameters
     ----------
@@ -337,7 +357,7 @@ def merge_virtual_datasets(vdatasets: list) -> xr.Dataset:
 
     if len(union_time) == 0:
         # No time dimension in any dataset
-        return xr.merge(rechunked, join='override', compat='override')
+        return _collect_datasets(rechunked)
 
     # Step 3: check if all datasets already share the same time axis
     all_same = True
@@ -350,24 +370,10 @@ def merge_virtual_datasets(vdatasets: list) -> xr.Dataset:
 
     if all_same:
         logger.debug("All datasets share the same time axis, skipping padding")
-        return xr.merge(rechunked, join='override', compat='override')
+        return _collect_datasets(rechunked)
 
     # Step 4: pad each dataset to match the union time axis
     padded = [pad_dataset_to_union_time(ds, union_time) for ds in rechunked]
 
-    # Step 5: combine into a single dataset.
-    # We avoid xr.merge() here because it triggers xarray's chunk manager
-    # lookup for ManifestArray, which fails in environments where entry
-    # point discovery is broken (e.g. AWS Lambda). Since all datasets are
-    # already padded to the same union time axis, we can directly collect
-    # variables and coordinates without any alignment.
-    all_vars = {}
-    all_coords = {}
-    for ds in padded:
-        for name, var in ds.data_vars.items():
-            all_vars[name] = var
-        for name, coord in ds.coords.items():
-            if name not in all_coords:
-                all_coords[name] = coord
-
-    return xr.Dataset(all_vars, coords=all_coords)
+    # Step 5: combine into a single dataset
+    return _collect_datasets(padded)
