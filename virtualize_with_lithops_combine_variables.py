@@ -16,7 +16,7 @@ import yaml
 
 from virtualizarr import open_virtual_dataset
 from virtualizarr.manifests import ChunkManifest, ManifestArray
-from virtualizarr.parsers import HDFParser, NetCDF3Parser
+from virtualizarr.parsers import HDFParser
 from virtualizarr.registry import ObjectStoreRegistry
 
 import zarr
@@ -138,17 +138,17 @@ def _rewrite_manifest_paths(vds: xr.Dataset, old_path: str, new_path: str) -> xr
     return vds
 
 
-def _open_netcdf3_via_download(url: str, s3_store, registry: ObjectStoreRegistry,
+def _open_netcdf3_via_download(url: str, s3_store, registry,
                                 loadable_variables: list) -> xr.Dataset:
     """Open a NetCDF3 file by downloading via obstore and parsing locally.
 
-    This avoids the s3fs dependency (which conflicts with Lambda's built-in
-    botocore). The file is downloaded to /tmp, parsed with NetCDF3Parser,
-    then manifest paths are rewritten to point back to the original S3 URL.
-
-    Loadable variables are read with xarray's scipy engine (native Python I/O)
-    rather than through obstore's LocalStore, which has issues on Lambda.
+    Bypasses virtualizarr's ManifestStore/ObjectStoreRegistry entirely by
+    using kerchunk + manifestgroup_from_kerchunk_refs directly. This avoids
+    the obstore LocalStore that fails on Lambda's async runtime.
     """
+    from kerchunk.netCDF3 import NetCDF3ToZarr
+    from virtualizarr.parsers.kerchunk.translator import manifestgroup_from_kerchunk_refs
+
     # Extract the S3 key from the full URL
     bucket_prefix = SOURCE_BUCKET
     s3_key = url[len(bucket_prefix) + 1:]  # strip "s3://bucket/" prefix
@@ -157,32 +157,26 @@ def _open_netcdf3_via_download(url: str, s3_store, registry: ObjectStoreRegistry
     data = obstore.get(s3_store, s3_key)
     tmp_dir = tempfile.gettempdir()
     tmp_path = os.path.join(tmp_dir, os.path.basename(url))
-    file_bytes = data.bytes()
     with open(tmp_path, 'wb') as f:
-        f.write(file_bytes)
+        f.write(data.bytes())
 
     try:
-        # Step 1: Create fully-virtual dataset (no data loaded through obstore).
-        # Kerchunk reads the file directly for structure/metadata.
-        # Pass loadable_variables=[] so ManifestStore never reads data chunks
-        # through the registry (obstore LocalStore has issues on Lambda).
-        vds = open_virtual_dataset(
-            url=f"file://{tmp_path}",
-            parser=NetCDF3Parser(),
-            registry=ObjectStoreRegistry(),
-            loadable_variables=[],
-            decode_times=False,
-        )
+        # Parse with kerchunk (uses fsspec, not obstore)
+        refs = NetCDF3ToZarr(tmp_path, inline_threshold=0).translate()
+        manifest_group = manifestgroup_from_kerchunk_refs(refs)
 
-        # Step 2: Read loadable variables with xarray/scipy (native file I/O).
+        # Build virtual dataset — bypasses ManifestStore and registry entirely
+        vds = manifest_group.to_virtual_dataset()
+
+        # Load coordinate/loadable variables with scipy
         with xr.open_dataset(tmp_path, engine='scipy', decode_times=False) as real_ds:
             vars_to_load = [v for v in loadable_variables if v in real_ds and v in vds]
             if vars_to_load:
-                vds_keep = vds.drop_vars(vars_to_load, errors='ignore')
                 real_keep = real_ds[vars_to_load].load()
+                vds_keep = vds.drop_vars(vars_to_load, errors='ignore')
                 vds = xr.merge([real_keep, vds_keep])
 
-        # Step 3: Rewrite manifest paths from local file:// to original S3 URL
+        # Rewrite paths: file:///tmp/foo.nc → s3://source.coop/...
         vds = _rewrite_manifest_paths(vds, f"file://{tmp_path}", url)
     finally:
         if os.path.exists(tmp_path):
