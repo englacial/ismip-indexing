@@ -55,14 +55,15 @@ def _make_repo_kwargs(prefix: str) -> dict:
         from_env=True,
     )
     config = icechunk.RepositoryConfig.default()
+    source_bucket = "s3://us-west-2.opendata.source.coop/englacial/ismip6"
     config.set_virtual_chunk_container(
         icechunk.VirtualChunkContainer(
-            "gs://ismip6/",
-            store=icechunk.gcs_store()
+            source_bucket + "/",
+            store=icechunk.s3_store(region=REGION, anonymous=True)
         )
     )
     config.max_concurrent_requests = 10
-    credentials = icechunk.containers_credentials({"gs://ismip6/": None})
+    credentials = icechunk.containers_credentials({source_bucket + "/": None})
     return {
         "storage": storage,
         "config": config,
@@ -241,8 +242,8 @@ class TestLithopsLambda:
             "institution_id": "AWI",
             "source_id": "PISM1",
             "urls": [
-                "gs://ismip6/Projection-AIS/AWI/PISM1/ctrl_proj_std/acabf_AIS_AWI_PISM1_ctrl_proj_std.nc",
-                "gs://ismip6/Projection-AIS/AWI/PISM1/ctrl_proj_std/lithk_AIS_AWI_PISM1_ctrl_proj_std.nc",
+                "s3://us-west-2.opendata.source.coop/englacial/ismip6/Projection-AIS/AWI/PISM1/ctrl_proj_std/acabf_AIS_AWI_PISM1_ctrl_proj_std.nc",
+                "s3://us-west-2.opendata.source.coop/englacial/ismip6/Projection-AIS/AWI/PISM1/ctrl_proj_std/lithk_AIS_AWI_PISM1_ctrl_proj_std.nc",
             ],
         }
 
@@ -273,7 +274,7 @@ class TestLithopsLambda:
             "institution_id": "AWI",
             "source_id": "PISM1",
             "urls": [
-                "gs://ismip6/Projection-AIS/AWI/PISM1/ctrl_proj_std/acabf_AIS_AWI_PISM1_ctrl_proj_std.nc",
+                "s3://us-west-2.opendata.source.coop/englacial/ismip6/Projection-AIS/AWI/PISM1/ctrl_proj_std/acabf_AIS_AWI_PISM1_ctrl_proj_std.nc",
             ],
         }
 
