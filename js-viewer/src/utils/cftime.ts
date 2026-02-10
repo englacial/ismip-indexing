@@ -219,11 +219,8 @@ export function yearFromLabel(label: string): number {
 
 /**
  * Find the index in timeLabels whose year is closest to the target year.
- * Returns 0 if no match found.
- */
-/**
- * Find the index in timeLabels whose year is closest to the target year.
- * Returns null if the target year is outside the range of years in the labels.
+ * Returns null if the target year is outside the range of valid (non-NaN) years,
+ * or if all labels have NaN years.
  */
 export function findIndexForYear(
   timeLabels: string[],
@@ -231,10 +228,18 @@ export function findIndexForYear(
 ): number | null {
   if (timeLabels.length === 0) return null;
 
-  const firstYear = yearFromLabel(timeLabels[0]);
-  const lastYear = yearFromLabel(timeLabels[timeLabels.length - 1]);
-  const lo = Math.min(firstYear, lastYear);
-  const hi = Math.max(firstYear, lastYear);
+  // Compute actual min/max years, skipping NaN labels
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (let i = 0; i < timeLabels.length; i++) {
+    const y = yearFromLabel(timeLabels[i]);
+    if (isNaN(y)) continue;
+    if (y < lo) lo = y;
+    if (y > hi) hi = y;
+  }
+
+  // No valid years at all
+  if (!isFinite(lo) || !isFinite(hi)) return null;
 
   // Out of range — no data for this year
   if (targetYear < lo || targetYear > hi) return null;
@@ -243,6 +248,7 @@ export function findIndexForYear(
   let bestDiff = Infinity;
   for (let i = 0; i < timeLabels.length; i++) {
     const y = yearFromLabel(timeLabels[i]);
+    if (isNaN(y)) continue;
     const diff = Math.abs(y - targetYear);
     if (diff < bestDiff) {
       bestDiff = diff;
@@ -262,12 +268,12 @@ export function yearRange(
   let max = -Infinity;
   for (const labels of allTimeLabels) {
     if (!labels || labels.length === 0) continue;
-    const first = yearFromLabel(labels[0]);
-    const last = yearFromLabel(labels[labels.length - 1]);
-    if (first < min) min = first;
-    if (last > max) max = last;
-    if (first > max) max = first;
-    if (last < min) min = last;
+    for (let i = 0; i < labels.length; i++) {
+      const y = yearFromLabel(labels[i]);
+      if (isNaN(y)) continue;
+      if (y < min) min = y;
+      if (y > max) max = y;
+    }
   }
   if (!isFinite(min)) return null;
   return { minYear: min, maxYear: max };

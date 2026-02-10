@@ -23,17 +23,17 @@ export default defineConfig({
       ],
     },
     proxy: {
-      // Proxy for icechunk store on S3
+      // Proxy for icechunk store on source.coop
       "/s3-proxy": {
-        target: "https://ismip6-icechunk.s3.us-west-2.amazonaws.com",
+        target: "https://data.source.coop",
         changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/s3-proxy/, ""),
+        rewrite: (path) => path.replace(/^\/s3-proxy/, "/englacial/ismip6-combined"),
       },
-      // Proxy for virtual chunk data from ismip6 GCS bucket
+      // Proxy for virtual chunk data from source.coop S3 bucket
       "/ismip6-proxy": {
-        target: "https://storage.googleapis.com",
+        target: "https://data.source.coop",
         changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/ismip6-proxy/, "/ismip6"),
+        rewrite: (path) => path.replace(/^\/ismip6-proxy/, "/englacial/ismip6"),
       },
     },
   },

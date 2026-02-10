@@ -34,6 +34,8 @@ export function Panel({ panel, isActive, canRemove }: PanelProps) {
     gridConfig,
     fillValue,
     variableMetadata,
+    selectedVariable,
+    targetYear,
   } = useViewerStore();
 
   const unitsLabel = variableMetadata?.units || null;
@@ -50,7 +52,7 @@ export function Panel({ panel, isActive, canRemove }: PanelProps) {
     maxZoom: 0,
   }), [CENTER_X, CENTER_Y]);
 
-  const { currentData, dataShape, selectedModel, selectedExperiment, isLoading, error, groupMetadata } = panel;
+  const { currentData, dataShape, selectedModel, selectedExperiment, isLoading, error, groupMetadata, allNaN } = panel;
   const [showInfo, setShowInfo] = useState(false);
 
   const availableExperiments = selectedModel
@@ -135,7 +137,8 @@ export function Panel({ panel, isActive, canRemove }: PanelProps) {
   }, [hoverGridPosition, panels, getValueAtGridPosition]);
 
   // Hide data when the target year is outside this panel's time range
-  const outOfRange = panel.resolvedTimeIndex === null && panel.timeLabels !== null;
+  // (also triggers when time labels couldn't be decoded but the array has a time dimension)
+  const outOfRange = panel.resolvedTimeIndex === null && panel.maxTimeIndex > 0;
 
   const layers = useMemo(() => {
     if (!bitmap || outOfRange) return [];
@@ -310,6 +313,7 @@ export function Panel({ panel, isActive, canRemove }: PanelProps) {
               padding: "12px 20px",
               borderRadius: "4px",
               fontSize: "14px",
+              zIndex: 160,
             }}
           >
             Loading...
@@ -336,7 +340,7 @@ export function Panel({ panel, isActive, canRemove }: PanelProps) {
         )}
 
         {/* Out of range overlay */}
-        {outOfRange && currentData && (
+        {outOfRange && (
           <div
             style={{
               position: "absolute",
@@ -349,6 +353,34 @@ export function Panel({ panel, isActive, canRemove }: PanelProps) {
           >
             <div style={{ fontSize: "14px", opacity: 0.7 }}>
               No data for selected year
+            </div>
+          </div>
+        )}
+
+        {/* All-NaN data overlay — persists through re-loads; cleared on selection change */}
+        {allNaN && currentData && (
+          <div
+            style={{
+              position: "absolute",
+              top: "50%",
+              left: "50%",
+              transform: "translate(-50%, -50%)",
+              textAlign: "center",
+              background: "rgba(0, 0, 0, 0.75)",
+              color: "white",
+              padding: "16px 24px",
+              borderRadius: "6px",
+              maxWidth: "80%",
+              zIndex: 150,
+            }}
+          >
+            <div style={{ fontSize: "14px", fontWeight: 500, marginBottom: "6px" }}>
+              No data available
+            </div>
+            <div style={{ fontSize: "11px", opacity: 0.7 }}>
+              {selectedVariable ? `"${selectedVariable}"` : "Variable"} contains only
+              NaN values for {selectedModel}/{selectedExperiment}
+              {targetYear != null && !isNaN(targetYear) ? ` at year ${targetYear}` : ""}
             </div>
           </div>
         )}

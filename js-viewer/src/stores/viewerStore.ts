@@ -8,11 +8,11 @@ import { parseTimeUnits, decodeTimeArray, yearFromLabel, findIndexForYear, yearR
 // Register numcodecs codecs at module load time
 registerCodecs();
 
-// Default ISMIP6 icechunk store URL (S3, combined-variables-v3)
+// Default ISMIP6 icechunk store URL (source.coop, combined year-binned)
 // Use proxy in development to avoid CORS issues
 const DEFAULT_STORE_URL = import.meta.env.DEV
-  ? "/s3-proxy/combined-variables-v3/"
-  : "https://ismip6-icechunk.s3.us-west-2.amazonaws.com/combined-variables-v3/";
+  ? "/s3-proxy/"
+  : "https://data.source.coop/englacial/ismip6-combined/";
 
 // Grid configuration derived from coordinate arrays or URL params
 export interface GridConfig {
@@ -66,6 +66,7 @@ export interface Panel {
   groupMetadata: GroupMetadata | null;
   timeLabels: string[] | null;
   resolvedTimeIndex: number | null;
+  allNaN: boolean;
 }
 
 // Known coordinate/dimension variable names to exclude from data variables
@@ -162,6 +163,7 @@ function createEmptyPanel(): Panel {
     groupMetadata: null,
     timeLabels: null,
     resolvedTimeIndex: 0,
+    allNaN: false,
   };
 }
 
@@ -455,16 +457,37 @@ async function discoverTimeLabels(
     const calendar = typeof attrs?.calendar === "string" ? attrs.calendar : null;
 
     const encoding = parseTimeUnits(units, calendar);
-    if (!encoding) {
-      console.warn("[timeLabels] Could not parse time encoding, units=", units, "calendar=", calendar);
-      return null;
-    }
 
     const timeData = await zarr.get(timeArr);
     const values = new Float64Array(timeData.data as unknown as ArrayBuffer);
-    const labels = decodeTimeArray(values, encoding);
-    console.log(`[timeLabels] Decoded ${labels.length} time labels, first=${labels[0]}, last=${labels[labels.length - 1]}`);
-    return labels;
+
+    if (encoding) {
+      const labels = decodeTimeArray(values, encoding);
+      console.log(`[timeLabels] Decoded ${labels.length} time labels, first=${labels[0]}, last=${labels[labels.length - 1]}`);
+      return labels;
+    }
+
+    // Fallback: if raw values look like years (all finite, in [1000, 3000]),
+    // use them directly as synthetic date labels.  This handles time arrays
+    // with non-CF units (e.g. bare "years") or missing units attributes.
+    if (values.length > 0) {
+      let allYearLike = true;
+      for (let i = 0; i < values.length; i++) {
+        const v = values[i];
+        if (!isFinite(v) || v < 1000 || v > 3000) {
+          allYearLike = false;
+          break;
+        }
+      }
+      if (allYearLike) {
+        const labels = Array.from(values, (v) => `${Math.round(v)}-01-01`);
+        console.log(`[timeLabels] Fallback: raw values as years, ${labels.length} labels, first=${labels[0]}, last=${labels[labels.length - 1]}`);
+        return labels;
+      }
+    }
+
+    console.warn("[timeLabels] Could not parse time encoding and values don't look like years, units=", units, "calendar=", calendar);
+    return null;
   } catch (err) {
     console.warn("[timeLabels] Could not read time array:", err);
     return null;
@@ -511,6 +534,9 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
       // In dev mode, route virtual chunk URLs through the proxy
       const virtualUrlTransformer = import.meta.env.DEV
         ? (url: string) => {
+            if (url.startsWith("s3://us-west-2.opendata.source.coop/englacial/ismip6/")) {
+              return url.replace("s3://us-west-2.opendata.source.coop/englacial/ismip6/", "/ismip6-proxy/");
+            }
             if (url.startsWith("gs://ismip6/")) {
               return url.replace("gs://ismip6/", "/ismip6-proxy/");
             }
@@ -686,6 +712,7 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
         timeLabels: null,
         groupMetadata: null,
         resolvedTimeIndex: null,
+        allNaN: false,
         error: null,
       };
     });
@@ -717,6 +744,7 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
             timeLabels: null,
             groupMetadata: null,
             resolvedTimeIndex: null,
+            allNaN: false,
             error: null,
           }
         : p
@@ -752,7 +780,14 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
     const targetYear = range.minYear + index;
     // Update each panel's resolvedTimeIndex (null = out of range)
     const updatedPanels = panels.map((p) => {
-      if (!p.timeLabels || p.timeLabels.length === 0) return p;
+      if (!p.timeLabels || p.timeLabels.length === 0) {
+        // No time labels but has a time dimension — can't resolve year,
+        // so mark as out-of-range (loadPanelData will handle properly).
+        if (p.maxTimeIndex > 0 && p.resolvedTimeIndex !== null) {
+          return { ...p, resolvedTimeIndex: null };
+        }
+        return p;
+      }
       const resolved = findIndexForYear(p.timeLabels, targetYear);
       return resolved !== p.resolvedTimeIndex ? { ...p, resolvedTimeIndex: resolved } : p;
     });
@@ -876,6 +911,12 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
       if (targetYear !== null && timeLabels && timeLabels.length > 0) {
         resolvedTimeIndex = findIndexForYear(timeLabels, targetYear);
         console.log(`[Panel ${panelId}] Year-aligned: targetYear=${targetYear}, resolvedIndex=${resolvedTimeIndex}${resolvedTimeIndex !== null ? ` (${timeLabels[resolvedTimeIndex]})` : ' (out of range)'}`);
+      } else if (targetYear !== null && !timeLabels && maxTime > 0) {
+        // Time dimension exists but labels couldn't be decoded — can't
+        // determine if targetYear is in range.  Show out-of-range rather
+        // than displaying data from an arbitrary time step.
+        console.warn(`[Panel ${panelId}] Time dimension (maxTime=${maxTime}) but no time labels; treating as out-of-range`);
+        resolvedTimeIndex = null;
       }
 
       // If target year is out of this panel's range, store null data
@@ -883,7 +924,7 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
         set({
           panels: get().panels.map((p) =>
             p.id === panelId
-              ? { ...p, currentData: null, dataShape: null, maxTimeIndex: maxTime, isLoading: false, groupMetadata: groupMeta, timeLabels, resolvedTimeIndex: null }
+              ? { ...p, currentData: null, dataShape: null, maxTimeIndex: maxTime, isLoading: false, groupMetadata: groupMeta, timeLabels, resolvedTimeIndex: null, allNaN: false }
               : p
           ),
         });
@@ -923,8 +964,9 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
         if (v < min) min = v;
         if (v > max) max = v;
       }
+      const dataAllNaN = nanCount === data.length || (min === Infinity && max === -Infinity);
       console.log(
-        `[Panel ${panelId}] Loaded ${data.length} values, min=${min}, max=${max}, nonZero=${nonZeroCount}, NaN=${nanCount}`
+        `[Panel ${panelId}] Loaded ${data.length} values, min=${min}, max=${max}, nonZero=${nonZeroCount}, NaN=${nanCount}, allNaN=${dataAllNaN}`
       );
 
       // Re-discover fill value and variable metadata for current variable
@@ -937,7 +979,7 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
         variableMetadata: varMeta,
         panels: get().panels.map((p) =>
           p.id === panelId
-            ? { ...p, currentData: data, dataShape, maxTimeIndex: maxTime, isLoading: false, groupMetadata: groupMeta, timeLabels, resolvedTimeIndex }
+            ? { ...p, currentData: data, dataShape, maxTimeIndex: maxTime, isLoading: false, groupMetadata: groupMeta, timeLabels, resolvedTimeIndex, allNaN: dataAllNaN }
             : p
         ),
       };
@@ -975,6 +1017,7 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
                 dataShape: null,
                 error: displayError,
                 isLoading: false,
+                allNaN: false,
               }
             : p
         ),
@@ -985,6 +1028,18 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
   loadAllPanels: async () => {
     const { panels, activePanelId, loadPanelData } = get();
     if (panels.length === 0) return;
+
+    // Mark all loadable panels as loading upfront so they all show
+    // the indicator immediately, rather than waiting for the sequential
+    // active-panel load to finish before the rest even start.
+    set({
+      panels: get().panels.map((p) =>
+        p.selectedModel && p.selectedExperiment
+          ? { ...p, isLoading: true, error: null }
+          : p
+      ),
+    });
+
     // Load the active panel first to establish targetYear from its time
     // labels (the slider is based on the active panel), then load the
     // rest in parallel so year-based alignment resolves correctly.
