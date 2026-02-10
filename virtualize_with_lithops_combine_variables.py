@@ -37,6 +37,25 @@ S3_PUT_COST_PER_REQUEST = 0.000005
 # Source data bucket (public, anonymous read)
 SOURCE_BUCKET = "s3://us-west-2.opendata.source.coop/englacial/ismip6"
 
+# Store type configurations: controls S3 prefix, time binning, and variable filtering
+STORE_TYPE_CONFIG = {
+    "combined": {
+        "prefix": "englacial/ismip6-combined",
+        "bin_time": True,
+        "filter": None,
+    },
+    "state": {
+        "prefix": "englacial/ismip6-state",
+        "bin_time": False,
+        "filter": "ST",
+    },
+    "flux": {
+        "prefix": "englacial/ismip6-flux",
+        "bin_time": False,
+        "filter": "FL",
+    },
+}
+
 
 def load_skip_list(path: str = "skip_list.txt") -> set:
     """Load the skip list from a text file.
@@ -164,7 +183,7 @@ def _open_netcdf3_via_download(url: str, s3_store, registry: ObjectStoreRegistry
     return vds
 
 
-def virtualize_and_combine_batch(urls: List[str], registry: ObjectStoreRegistry) -> Dict[str, Any]:
+def virtualize_and_combine_batch(urls: List[str], registry: ObjectStoreRegistry, bin_time: bool = True) -> Dict[str, Any]:
     # Take a batch of datasets that belong to a single simulation (same model + experiment) and merge them into
     # a single virtual dataset
 
@@ -199,8 +218,9 @@ def virtualize_and_combine_batch(urls: List[str], registry: ObjectStoreRegistry)
         # because 'time' is in loadable_variables so it's real data, not a ManifestArray
         vds_var_fixed_time = ismip6_helper.fix_time_encoding(vds_var)
         vds_var_normalized_time = ismip6_helper.normalize_time_encoding(vds_var_fixed_time)
-        vds_var_year_binned = ismip6_helper.bin_time_to_year(vds_var_normalized_time)
-        vds_var_fixed_grid = ismip6_helper.correct_grid_coordinates(vds_var_year_binned, _parse_variable_from_url(url))
+        if bin_time:
+            vds_var_normalized_time = ismip6_helper.bin_time_to_year(vds_var_normalized_time)
+        vds_var_fixed_grid = ismip6_helper.correct_grid_coordinates(vds_var_normalized_time, _parse_variable_from_url(url))
         vdatasets.append(vds_var_fixed_grid)
 
     # Rechunk, pad to union time axis, and merge
@@ -215,7 +235,8 @@ def batch_virt_func(batch: Tuple[Tuple[str], List[Dict[str, Union[str, int]]]]) 
         bucket = SOURCE_BUCKET
         store = obstore.store.from_url(bucket, skip_signature=True)
         registry = ObjectStoreRegistry({bucket: store})
-        vds = virtualize_and_combine_batch(batch['urls'], registry)
+        bin_time = batch.get('bin_time', True)
+        vds = virtualize_and_combine_batch(batch['urls'], registry, bin_time=bin_time)
         return {
                 'success': True,
                 'batch': batch,
@@ -359,7 +380,7 @@ def _load_store_credentials(write_creds: str) -> dict:
     return creds
 
 
-def get_repo_kwargs(local_storage: bool = False, cloud_backend: str = "aws", write_creds: str = None) -> dict:
+def get_repo_kwargs(local_storage: bool = False, cloud_backend: str = "aws", write_creds: str = None, store_type: str = "combined") -> dict:
     """Build icechunk Repository kwargs for the given storage backend.
 
     Args:
@@ -368,13 +389,15 @@ def get_repo_kwargs(local_storage: bool = False, cloud_backend: str = "aws", wri
             concurrency settings to use.
         write_creds: Path to JSON file with source.coop store write credentials.
             If None, credentials are read from the environment.
+        store_type: One of 'combined', 'state', 'flux'. Controls the S3 prefix.
     """
+    s3_prefix = STORE_TYPE_CONFIG[store_type]["prefix"]
     if local_storage:
         storage = icechunk.local_filesystem_storage("test-output/test_icechunk")
     elif cloud_backend == "aws":
         storage_kwargs = dict(
             bucket="us-west-2.opendata.source.coop",
-            prefix="englacial/ismip6-combined",
+            prefix=s3_prefix,
             region="us-west-2",
         )
         if write_creds:
@@ -473,6 +496,7 @@ def process_all_files(
     test_model: str = None,
     test_experiment: str = None,
     write_creds: str = None,
+    store_type: str = "combined",
 ):
     """Process all files using Lithops serverless executor.
 
@@ -503,12 +527,22 @@ def process_all_files(
         files_df = files_df[files_df['experiment'] == test_experiment]
         print(f"  Filtered to experiment: {test_experiment} ({len(files_df)} files)")
 
+    # Filter by variable type for state/flux stores
+    store_config = STORE_TYPE_CONFIG[store_type]
+    if store_config["filter"] is not None:
+        if store_config["filter"] == "ST":
+            allowed_vars = ismip6_helper.get_state_variables()
+        else:
+            allowed_vars = ismip6_helper.get_flux_variables()
+        files_df = files_df[files_df['variable'].isin(allowed_vars)]
+        print(f"  Filtered to {store_config['filter']} variables: {len(files_df)} files ({len(allowed_vars)} variable names)")
+
     # Step 2: Group by model and experiment and create
     print("\nStep 2/3: Grouping files by model and experiment...")
     grouped = files_df.groupby(['institution', 'model_name', 'experiment'])
 
     # skip groups already in the zarr store
-    repo_kwargs = get_repo_kwargs(local_storage=local_storage, cloud_backend=cloud_backend, write_creds=write_creds)
+    repo_kwargs = get_repo_kwargs(local_storage=local_storage, cloud_backend=cloud_backend, write_creds=write_creds, store_type=store_type)
     print(f"Opening icechunk repo at {repo_kwargs['storage']}")
     repo = icechunk.Repository.open_or_create(**repo_kwargs)
     session = repo.readonly_session(branch="main")
@@ -555,7 +589,8 @@ def process_all_files(
             'experiment_id': experiment_id,
             'institution_id': institution_id,
             'source_id': source_id,
-            'urls': urls
+            'urls': urls,
+            'bin_time': store_config['bin_time'],
         })
 
     if total_skipped_files:
@@ -726,6 +761,12 @@ if __name__ == "__main__":
              "Expected keys: aws_access_key_id, aws_secret_access_key, aws_session_token. "
              "If not provided, credentials are read from the environment."
     )
+    parser.add_argument(
+        "--store-type", default="combined",
+        choices=["combined", "state", "flux"],
+        help="Type of icechunk store to build: 'combined' (all variables, year-binned), "
+             "'state' (ST variables only), or 'flux' (FL variables only). Default: combined."
+    )
     args = parser.parse_args()
 
     # Infer backend from config, or default based on config filename
@@ -752,6 +793,7 @@ if __name__ == "__main__":
         test_model=args.test_model,
         test_experiment=args.test_experiment,
         write_creds=args.write_creds,
+        store_type=args.store_type,
     )
 
     successes = [get_id_from_batch(r['batch']) for r in result['successful']]
