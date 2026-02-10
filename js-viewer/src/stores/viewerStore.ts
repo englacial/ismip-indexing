@@ -8,11 +8,13 @@ import { parseTimeUnits, decodeTimeArray, yearFromLabel, findIndexForYear, yearR
 // Register numcodecs codecs at module load time
 registerCodecs();
 
-// Default ISMIP6 icechunk store URL (source.coop, combined year-binned)
+// Default ISMIP6 icechunk store URL (source.coop, unified store)
 // Use proxy in development to avoid CORS issues
 const DEFAULT_STORE_URL = import.meta.env.DEV
   ? "/s3-proxy/"
-  : "https://data.source.coop/englacial/ismip6-combined/";
+  : "https://data.source.coop/englacial/ismip6/icechunk-ais/";
+
+const DEFAULT_GROUP_PATH = "combined";
 
 // Grid configuration derived from coordinate arrays or URL params
 export interface GridConfig {
@@ -77,6 +79,8 @@ const COORD_NAMES = new Set([
   "mapping", "crs", "spatial_ref",
 ]);
 
+export type DataView = "combined" | "state" | "flux";
+
 interface ViewerState {
   // Connection state
   isInitializing: boolean;
@@ -85,6 +89,9 @@ interface ViewerState {
 
   // Embed configuration (null = standalone mode)
   embedConfig: EmbedConfig | null;
+
+  // Data view (top-level group in unified store)
+  dataView: DataView;
 
   // Grid configuration (derived from store or URL params)
   gridConfig: GridConfig;
@@ -128,6 +135,7 @@ interface ViewerState {
 
   // Actions
   initialize: () => Promise<void>;
+  setDataView: (view: DataView) => Promise<void>;
   addPanel: () => void;
   removePanel: (panelId: string) => void;
   setActivePanel: (panelId: string) => void;
@@ -500,6 +508,7 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
   initError: null,
   store: null,
   embedConfig: null,
+  dataView: "combined" as DataView,
   gridConfig: DEFAULT_GRID,
   models: [],
   experiments: new Map(),
@@ -526,7 +535,8 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
 
   initialize: async () => {
     const embedConfig = parseUrlParams();
-    set({ isInitializing: true, initError: null, embedConfig });
+    const initialDataView: DataView = (embedConfig?.data_view as DataView) || "combined";
+    set({ isInitializing: true, initError: null, embedConfig, dataView: initialDataView });
     try {
       // Determine store URL (configurable via embed param)
       const storeUrl = embedConfig?.store_url || DEFAULT_STORE_URL;
@@ -555,25 +565,22 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
       });
 
       // Discover hierarchy (models/experiments/variables)
+      const groupPath = embedConfig?.group_path || initialDataView || DEFAULT_GROUP_PATH;
       const { models, experiments, variables, hierarchyDepth } =
-        await discoverHierarchy(store, embedConfig?.group_path);
+        await discoverHierarchy(store, groupPath);
 
       // Discover grid config from coordinate arrays
       let sampleGroupPath = "";
       if (hierarchyDepth === 2 && models.length > 0) {
         const firstExps = experiments.get(models[0]) || [];
         if (firstExps.length > 0) {
-          sampleGroupPath = embedConfig?.group_path
-            ? `${embedConfig.group_path}/${models[0]}/${firstExps[0]}`
-            : `${models[0]}/${firstExps[0]}`;
+          sampleGroupPath = `${groupPath}/${models[0]}/${firstExps[0]}`;
         }
       } else if (hierarchyDepth === 1) {
         const rootExps = experiments.get("_root") || [];
-        sampleGroupPath = embedConfig?.group_path
-          ? `${embedConfig.group_path}/${rootExps[0]}`
-          : rootExps[0] || "";
+        sampleGroupPath = `${groupPath}/${rootExps[0]}`;
       } else {
-        sampleGroupPath = embedConfig?.group_path || "";
+        sampleGroupPath = groupPath;
       }
 
       const gridConfig = await discoverGridConfig(store, sampleGroupPath, embedConfig);
@@ -651,6 +658,65 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
       console.error("Failed to initialize:", err);
       set({
         initError: err instanceof Error ? err.message : "Failed to initialize",
+        isInitializing: false,
+      });
+    }
+  },
+
+  setDataView: async (view: DataView) => {
+    const { store, embedConfig } = get();
+    if (!store) return;
+
+    set({ isInitializing: true, dataView: view });
+
+    try {
+      const groupPath = embedConfig?.group_path || view;
+      const { models, experiments, variables, hierarchyDepth } =
+        await discoverHierarchy(store, groupPath);
+
+      // Discover grid config from first sample group
+      let sampleGroupPath = "";
+      if (hierarchyDepth === 2 && models.length > 0) {
+        const firstExps = experiments.get(models[0]) || [];
+        if (firstExps.length > 0) {
+          sampleGroupPath = `${groupPath}/${models[0]}/${firstExps[0]}`;
+        }
+      } else if (hierarchyDepth === 1) {
+        const rootExps = experiments.get("_root") || [];
+        sampleGroupPath = `${groupPath}/${rootExps[0]}`;
+      } else {
+        sampleGroupPath = groupPath;
+      }
+
+      const gridConfig = await discoverGridConfig(store, sampleGroupPath, embedConfig);
+
+      let fillValue: number | null = null;
+      if (variables.length > 0 && sampleGroupPath) {
+        fillValue = await discoverFillValue(store, `${sampleGroupPath}/${variables[0]}`);
+      }
+
+      const defaultVariable = variables.length > 0 ? variables[0] : null;
+      const initialPanel = createEmptyPanel();
+
+      set({
+        models,
+        experiments,
+        variables,
+        hierarchyDepth,
+        gridConfig,
+        fillValue,
+        selectedVariable: defaultVariable,
+        panels: [initialPanel],
+        activePanelId: initialPanel.id,
+        timeIndex: 0,
+        targetYear: null,
+        variableMetadata: null,
+        isInitializing: false,
+      });
+    } catch (err) {
+      console.error("Failed to switch data view:", err);
+      set({
+        initError: err instanceof Error ? err.message : "Failed to switch data view",
         isInitializing: false,
       });
     }
@@ -853,7 +919,7 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
     try {
       // Build path based on hierarchy depth
       let arrayPath: string;
-      const basePath = embedConfig?.group_path || "";
+      const basePath = embedConfig?.group_path || get().dataView;
 
       if (hierarchyDepth === 2) {
         arrayPath = basePath
@@ -895,9 +961,7 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
       let groupMeta: GroupMetadata | null = null;
       let timeLabels: string[] | null = null;
       if (hierarchyDepth === 2 && panel.selectedModel && panel.selectedExperiment) {
-        const groupPath = embedConfig?.group_path
-          ? `${embedConfig.group_path}/${panel.selectedModel}/${panel.selectedExperiment}`
-          : `${panel.selectedModel}/${panel.selectedExperiment}`;
+        const groupPath = `${basePath}/${panel.selectedModel}/${panel.selectedExperiment}`;
         groupMeta = await discoverGroupMetadata(store, groupPath);
         if (maxTime > 0) {
           timeLabels = await discoverTimeLabels(store, groupPath);

@@ -64,7 +64,7 @@ store to read from:
 
 ````markdown
 ```{ismip6-viewer}
-:store_url: https://ismip6-icechunk.s3.us-west-2.amazonaws.com/combined-variables-v3/
+:store_url: https://data.source.coop/englacial/ismip6/icechunk-ais/
 :model: DOE_MALI
 :experiment: ctrl_proj_std
 :variable: lithk
@@ -75,7 +75,7 @@ Multi-panel comparison (linked zoom/pan):
 
 ````markdown
 ```{ismip6-viewer}
-:store_url: https://ismip6-icechunk.s3.us-west-2.amazonaws.com/combined-variables-v3/
+:store_url: https://data.source.coop/englacial/ismip6/icechunk-ais/
 :panels: [{"model": "DOE_MALI", "experiment": "exp05"}, {"model": "JPL1_ISSM", "experiment": "exp05"}]
 :variable: lithk
 :controls: time
@@ -86,7 +86,7 @@ Pinned to a specific store version for reproducibility:
 
 ````markdown
 ```{ismip6-viewer}
-:store_url: https://ismip6-icechunk.s3.us-west-2.amazonaws.com/combined-variables-v3/
+:store_url: https://data.source.coop/englacial/ismip6/icechunk-ais/
 :store_ref: 0KJ35GFRGPGJ2DYWYWNG
 :model: DOE_MALI
 :variable: lithk
@@ -120,19 +120,19 @@ Or copy the `_extensions/ismip6-viewer/` directory into your project.
 ### Usage
 
 ```markdown
-{{< ismip6-viewer store_url="https://ismip6-icechunk.s3.us-west-2.amazonaws.com/combined-variables-v3/" model="DOE_MALI" experiment="ctrl_proj_std" variable="lithk" >}}
+{{< ismip6-viewer store_url="https://data.source.coop/englacial/ismip6/icechunk-ais/" model="DOE_MALI" experiment="ctrl_proj_std" variable="lithk" >}}
 ```
 
 Multi-panel:
 
 ```markdown
-{{< ismip6-viewer store_url="https://ismip6-icechunk.s3.us-west-2.amazonaws.com/combined-variables-v3/" panels='[{"model":"DOE_MALI","experiment":"exp05"},{"model":"JPL1_ISSM","experiment":"exp05"}]' variable="lithk" controls="time" >}}
+{{< ismip6-viewer store_url="https://data.source.coop/englacial/ismip6/icechunk-ais/" panels='[{"model":"DOE_MALI","experiment":"exp05"},{"model":"JPL1_ISSM","experiment":"exp05"}]' variable="lithk" controls="time" >}}
 ```
 
 Pinned to a specific snapshot:
 
 ```markdown
-{{< ismip6-viewer store_url="https://ismip6-icechunk.s3.us-west-2.amazonaws.com/combined-variables-v3/" store_ref="0KJ35GFRGPGJ2DYWYWNG" variable="lithk" >}}
+{{< ismip6-viewer store_url="https://data.source.coop/englacial/ismip6/icechunk-ais/" store_ref="0KJ35GFRGPGJ2DYWYWNG" variable="lithk" >}}
 ```
 
 Non-HTML outputs (PDF, LaTeX) render a placeholder message instead of the
@@ -149,6 +149,7 @@ interactive viewer.
 | `store_url` | string | **yes** | icechunk store URL. This is the only required option. |
 | `store_ref` | string | no | Store version to read. Can be a **branch name** (e.g., `main`), a **tag**, or a **snapshot ID** (20-character Crockford Base32 string). Defaults to `main`. Use a snapshot ID for reproducible, immutable references. |
 | `group_path` | string | no | Base group path within the store. Use when data sits under a sub-group rather than at the store root. |
+| `data_view` | string | no | Data view to display: `combined` (default, year-binned, all variables), `state` (original timestamps, state variables only), or `flux` (original timestamps, flux variables only). Maps to the top-level group in the unified store. |
 
 ### Data selection
 
@@ -210,6 +211,40 @@ Setting `vmin`/`vmax` explicitly disables auto-range. All other overrides
 are applied on top of discovery results — for example, setting `model` still
 allows the viewer to discover experiments and variables from the store.
 
+---
+
+## Data views
+
+The unified ISMIP6 icechunk store contains three top-level groups, each
+providing a different view of the same underlying data:
+
+| View | Group | Time handling | Variables |
+|------|-------|---------------|-----------|
+| **Combined** | `combined/` | Year-binned (one time step per year) | All variables (state + flux) |
+| **State** | `state/` | Original model timestamps | State variables only (lithk, orog, xvelsurf, ...) |
+| **Flux** | `flux/` | Original model timestamps | Flux variables only (acabf, libmassbfgr, ...) |
+
+The viewer includes an interactive toggle in the sidebar to switch between
+views. You can also set the initial view via the `data_view` option:
+
+**MyST:**
+
+````markdown
+```{ismip6-viewer}
+:store_url: https://data.source.coop/englacial/ismip6/icechunk-ais/
+:data_view: state
+:model: DOE_MALI
+:experiment: ctrl_proj_std
+:variable: lithk
+```
+````
+
+**Quarto:**
+
+```markdown
+{{< ismip6-viewer store_url="https://data.source.coop/englacial/ismip6/icechunk-ais/" data_view="state" model="DOE_MALI" experiment="ctrl_proj_std" variable="lithk" >}}
+```
+
 ## Reproducibility with `store_ref`
 
 icechunk stores are versioned. Every write operation creates a new snapshot,
@@ -222,7 +257,7 @@ ID** to pin the viewer to an exact, immutable version of the data:
 
 ````markdown
 ```{ismip6-viewer}
-:store_url: https://ismip6-icechunk.s3.us-west-2.amazonaws.com/combined-variables-v3/
+:store_url: https://data.source.coop/englacial/ismip6/icechunk-ais/
 :store_ref: 0KJ35GFRGPGJ2DYWYWNG
 :variable: lithk
 :model: DOE_MALI

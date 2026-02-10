@@ -27,7 +27,7 @@ export default defineConfig({
       "/s3-proxy": {
         target: "https://data.source.coop",
         changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/s3-proxy/, "/englacial/ismip6-combined"),
+        rewrite: (path) => path.replace(/^\/s3-proxy/, "/englacial/ismip6/icechunk-ais"),
       },
       // Proxy for virtual chunk data from source.coop S3 bucket
       "/ismip6-proxy": {
