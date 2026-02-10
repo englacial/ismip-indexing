@@ -9,11 +9,14 @@ The ISMIP6 standard grid is a polar stereographic projection (EPSG:3031):
 - Resolutions: 32 km, 16 km, 8 km, 4 km, 2 km, or 1 km
 """
 
+import logging
 import numpy as np
 import xarray as xr
 from typing import Tuple, Optional
 import warnings
 import pyproj
+
+logger = logging.getLogger(__name__)
 
 
 # ISMIP6 standard grid parameters (EPSG:3031 - Antarctic Polar Stereographic)
@@ -196,8 +199,19 @@ def correct_grid_coordinates(ds: xr.Dataset, data_var: Optional[str] = None) -> 
     has_y = 'y' in ds.coords
 
     if has_x and has_y:
-        # Coordinates exist, no correction needed
-        return ds
+        # Coordinates exist -- check for duplicates which break xarray indexing
+        x_vals = ds.coords['x'].values
+        y_vals = ds.coords['y'].values
+        x_has_dupes = len(x_vals) != len(np.unique(x_vals))
+        y_has_dupes = len(y_vals) != len(np.unique(y_vals))
+        if not x_has_dupes and not y_has_dupes:
+            return ds
+        # Fall through to regenerate coordinates from the ISMIP6 grid spec
+        logger.warning(
+            "Duplicate coordinate values detected (x_dupes=%s, y_dupes=%s), "
+            "regenerating from ISMIP6 grid spec",
+            x_has_dupes, y_has_dupes,
+        )
 
     # Find the data variable to use for dimension detection
     if data_var is None:

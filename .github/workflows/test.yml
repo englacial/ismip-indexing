@@ -14,7 +14,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - run: uv python install 3.12
       - run: uv sync --extra dev
-      - run: uv run python -m pytest tests/test_config.py -v -m "not integration"
+      - run: uv run python -m pytest tests/ -v -m "not integration"
 
   integration-tests:
     runs-on: ubuntu-latest

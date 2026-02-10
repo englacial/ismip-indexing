@@ -6,15 +6,5 @@
 # Empty file (0 bytes at source)
 ULB/fETISh_16km/expA6/xvelbase_AIS_ULB_fETISh_expA6.nc
 
-# NCAR_CISM/expD12 - 11 files with no data variables
-NCAR/CISM/expD12/acabf_AIS_NCAR_CISM_expD12.nc
-NCAR/CISM/expD12/base_AIS_NCAR_CISM_expD12.nc
-NCAR/CISM/expD12/dlithkdt_AIS_NCAR_CISM_expD12.nc
-NCAR/CISM/expD12/hfgeoubed_AIS_NCAR_CISM_expD12.nc
-NCAR/CISM/expD12/libmassbffl_AIS_NCAR_CISM_expD12.nc
-NCAR/CISM/expD12/libmassbfgr_AIS_NCAR_CISM_expD12.nc
-NCAR/CISM/expD12/licalvf_AIS_NCAR_CISM_expD12.nc
-NCAR/CISM/expD12/lifmassbf_AIS_NCAR_CISM_expD12.nc
-NCAR/CISM/expD12/ligroundf_AIS_NCAR_CISM_expD12.nc
-NCAR/CISM/expD12/litempbotfl_AIS_NCAR_CISM_expD12.nc
-NCAR/CISM/expD12/litempbotgr_AIS_NCAR_CISM_expD12.nc
+# NCAR_CISM/expD12 - all files have no data variables or lat/lon conflicts
+NCAR/CISM/expD12/

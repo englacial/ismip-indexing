@@ -154,6 +154,22 @@ class TestBinTimeToYear:
         result = bin_time_to_year(ds)
         assert "time" not in result.variables
 
+    def test_unnormalized_time_skipped(self):
+        """Time with non-standard encoding should be skipped, not overflow."""
+        # Simulate normalize_time_encoding failure: attrs still have original encoding
+        time_values = np.array([5475.0, 5840.0, 6205.0])  # days since some other epoch
+        time_coord = xr.Variable(
+            dims=("time",),
+            data=time_values,
+            attrs={"units": "days since 1995-01-01", "calendar": "365_day"},
+        )
+        var = _make_manifest_var(3)
+        ds = xr.Dataset({"acabf": var}, coords={"time": time_coord})
+
+        result = bin_time_to_year(ds)
+        # Should return unchanged -- not crash with overflow
+        np.testing.assert_array_equal(result['time'].values, time_values)
+
 
 # ---------------------------------------------------------------------------
 # Tests: compute_union_time_axis

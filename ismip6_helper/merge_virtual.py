@@ -57,14 +57,31 @@ def bin_time_to_year(ds: xr.Dataset) -> xr.Dataset:
     if 'time' not in ds.variables:
         return ds
 
+    # Check that time encoding was actually normalized. normalize_time_encoding
+    # can silently return the dataset unchanged on failure (e.g. overflow).
+    # If the attrs don't match, binning with the standard constants would produce
+    # garbage or overflow.
+    time_attrs = ds['time'].attrs
+    if time_attrs.get('units') != STANDARD_TIME_UNITS or \
+       time_attrs.get('calendar') != STANDARD_TIME_CALENDAR:
+        logger.warning(
+            "Time encoding not normalized (units=%r, calendar=%r), skipping year binning",
+            time_attrs.get('units'), time_attrs.get('calendar'),
+        )
+        return ds
+
     ds = ds.copy()
     time_values = ds['time'].values
 
-    dates = cftime.num2date(
-        time_values,
-        units=STANDARD_TIME_UNITS,
-        calendar=STANDARD_TIME_CALENDAR,
-    )
+    try:
+        dates = cftime.num2date(
+            time_values,
+            units=STANDARD_TIME_UNITS,
+            calendar=STANDARD_TIME_CALENDAR,
+        )
+    except Exception as e:
+        logger.warning("Failed to decode time values for year binning: %s", e)
+        return ds
 
     jan1_dates = [
         cftime.datetime(dt.year, 1, 1, calendar=STANDARD_TIME_CALENDAR)
