@@ -1,6 +1,7 @@
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed, Future
 import dataclasses
+import gc
 import logging
 import os
 import tempfile
@@ -734,6 +735,12 @@ def process_all_files(
     failed_writes = [r for r in writing_results if not r.get("success")]
     print(f"Writing: {len(successful_writes)} successful, {len(failed_writes)} failed")
 
+    # Explicitly release heavy objects before returning so they don't
+    # linger until the next store-type pass when running --store-type all
+    del virtualization_results, successful_results, virt_futures
+    del repo, writing_results
+    gc.collect()
+
     return {
         'successful': successful_writes,
         'failed': failed_writes
@@ -836,3 +843,7 @@ if __name__ == "__main__":
                 print(f"  {err[:200]}")
                 for batch_id in ids:
                     print(f"    - {batch_id}")
+
+        # Free results from this pass before starting the next store type
+        del result
+        gc.collect()
