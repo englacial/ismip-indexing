@@ -816,7 +816,35 @@ if __name__ == "__main__":
     else:
         store_types = [args.store_type]
 
-    for st in store_types:
+    if len(store_types) > 1:
+        # Run each store type in a separate subprocess to ensure full cleanup
+        # of Lithops threads, icechunk Rust runtime, and boto3 connection pools
+        # between passes. Without this, CPU usage spikes after the first pass.
+        import subprocess
+        import sys
+        for st in store_types:
+            print(f"\n{'='*60}\nProcessing store type: {st} (subprocess)\n{'='*60}")
+            cmd = [sys.executable, __file__,
+                   "--config", args.config,
+                   "--store-type", st]
+            if args.local_storage:
+                cmd.append("--local-storage")
+            if args.local_execution:
+                cmd.append("--local-execution")
+            if args.test_model:
+                cmd.extend(["--test-model", args.test_model])
+            if args.test_experiment:
+                cmd.extend(["--test-experiment", args.test_experiment])
+            if args.sequential_writes:
+                cmd.append("--sequential-writes")
+            if args.write_creds:
+                cmd.extend(["--write-creds", args.write_creds])
+            proc = subprocess.run(cmd)
+            if proc.returncode != 0:
+                print(f"\nERROR: store type '{st}' exited with code {proc.returncode}")
+                sys.exit(proc.returncode)
+    else:
+        st = store_types[0]
         print(f"\n{'='*60}\nProcessing store type: {st}\n{'='*60}")
         result = process_all_files(
             local_storage=args.local_storage,
@@ -843,7 +871,3 @@ if __name__ == "__main__":
                 print(f"  {err[:200]}")
                 for batch_id in ids:
                     print(f"    - {batch_id}")
-
-        # Free results from this pass before starting the next store type
-        del result
-        gc.collect()
