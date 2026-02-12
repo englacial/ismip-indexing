@@ -332,6 +332,16 @@ def batch_write_func(batch: Tuple[Tuple[str], List[Dict[str, Union[str, int]]]],
         if 'commit_id' in result_holder:
             if attempt > 0:
                 print(f"    {path}: succeeded on attempt {attempt + 1}")
+
+            # Post-write annotation: detect and annotate ignore values
+            try:
+                annotated = ismip6_helper.annotate_store_group(repo, path)
+                if annotated:
+                    print(f"    {path}: annotated ignore_value attrs")
+            except Exception as ann_err:
+                # Annotation failure is non-fatal — the data is already written
+                print(f"    {path}: ignore_value annotation failed (non-fatal): {ann_err}")
+
             return {
                 'success': True,
                 'batch': batch,
