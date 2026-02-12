@@ -77,6 +77,52 @@ def _make_manifest_var(n_time, ny=3, nx=3, per_timestep=True):
     return xr.Variable(dims=("time", "y", "x"), data=marr)
 
 
+def _make_manifest_var_spatial_chunks(n_time, ny=6, nx=6, chunk_ny=3, chunk_nx=3):
+    """Create a ManifestArray with per-timestep AND multi-spatial chunks.
+
+    Simulates HDF5 files like LSCE_GRISLI2 where each time step is split
+    into a grid of spatial tiles (e.g. 761x761 with chunk shape (1, 381, 381)
+    yields a 2x2 spatial chunk grid).
+
+    Returns an xr.Variable backed by a ManifestArray with shape (n_time, ny, nx)
+    and chunk grid shape (n_time, ny//chunk_ny, nx//chunk_nx).
+    """
+    import math
+    n_chunks_y = math.ceil(ny / chunk_ny)
+    n_chunks_x = math.ceil(nx / chunk_nx)
+    chunk_grid_shape = (n_time, n_chunks_y, n_chunks_x)
+
+    paths = np.empty(chunk_grid_shape, dtype=np.dtypes.StringDType())
+    offsets = np.empty(chunk_grid_shape, dtype=np.dtype("uint64"))
+    lengths = np.empty(chunk_grid_shape, dtype=np.dtype("uint64"))
+
+    # Each spatial chunk has a different compressed size (simulate real HDF5)
+    base_offset = 1000
+    cursor = base_offset
+    for t in range(n_time):
+        for cy in range(n_chunks_y):
+            for cx in range(n_chunks_x):
+                paths[t, cy, cx] = "s3://bucket/data.nc"
+                offsets[t, cy, cx] = cursor
+                # Simulate variable compressed size
+                chunk_bytes = chunk_ny * chunk_nx * 8 // 2 + t + cy * 100 + cx * 50
+                lengths[t, cy, cx] = chunk_bytes
+                cursor += chunk_bytes
+
+    manifest = ChunkManifest.from_arrays(
+        paths=paths, offsets=offsets, lengths=lengths, validate_paths=False
+    )
+
+    metadata = create_v3_array_metadata(
+        shape=(n_time, ny, nx),
+        data_type=np.dtype("float64"),
+        chunk_shape=(1, chunk_ny, chunk_nx),
+    )
+
+    marr = ManifestArray(metadata=metadata, chunkmanifest=manifest)
+    return xr.Variable(dims=("time", "y", "x"), data=marr)
+
+
 def _make_manifest_2d(ny=3, nx=3):
     """Create a 2D ManifestArray variable with no time dimension (e.g. hfgeoubed)."""
     itemsize = 8
@@ -269,6 +315,50 @@ class TestPadManifestToUnion:
         padded = _pad_manifest_to_union(var, union_time, ds_time)
         assert padded.data.shape == (3, 5, 5)
 
+    def test_spatial_chunks_preserved(self):
+        """Multi-spatial-chunk manifests (e.g. LSCE_GRISLI2) retain spatial chunk grid.
+
+        Reproduces the bug where a (n_time, 2, 2) spatial chunk grid was
+        collapsed to (n_union, 1, 1), causing incorrect flat-index lookup
+        and wrong chunk_shape metadata (full spatial extent instead of tile size).
+        """
+        # 3 timesteps, 6x6 grid with 3x3 chunk tiles -> (3, 2, 2) chunk grid
+        var = _make_manifest_var_spatial_chunks(n_time=3, ny=6, nx=6, chunk_ny=3, chunk_nx=3)
+        ds_time = np.array([_days_since_2000(y) for y in [2015, 2016, 2017]])
+        # Union has 4 timesteps (one gap at 2018)
+        union_time = np.array([_days_since_2000(y) for y in [2015, 2016, 2017, 2018]])
+
+        padded = _pad_manifest_to_union(var, union_time, ds_time)
+        marr = padded.data
+
+        # Shape should be (4, 6, 6)
+        assert marr.shape == (4, 6, 6)
+
+        # Chunk shape must be preserved as (1, 3, 3), NOT (1, 6, 6)
+        assert tuple(marr.metadata.chunk_grid.chunk_shape) == (1, 3, 3)
+
+        # Chunk grid should be (4, 2, 2) — 4 spatial tiles per timestep
+        assert marr.manifest.shape_chunk_grid == (4, 2, 2)
+
+        # 3 matched timesteps × 4 spatial tiles = 12 real entries
+        entries = list(marr.manifest.values())
+        real_entries = [e for e in entries if e["path"] != ""]
+        assert len(real_entries) == 12
+
+        # Verify that each timestep's 4 tiles have distinct offsets
+        # (not cycling through tiles of a single timestep)
+        original_entries = list(var.data.manifest.values())
+        padded_entries = list(marr.manifest.values())
+
+        # Original: entries 0-3 = t=0 tiles, 4-7 = t=1 tiles, 8-11 = t=2 tiles
+        # Padded:   entries 0-3 = t=0 tiles, 4-7 = t=1 tiles, 8-11 = t=2 tiles, 12-15 = t=3 (empty)
+        for t in range(3):
+            for tile in range(4):
+                orig_idx = t * 4 + tile
+                padded_idx = t * 4 + tile
+                assert padded_entries[padded_idx]["offset"] == original_entries[orig_idx]["offset"], \
+                    f"Mismatch at t={t}, tile={tile}"
+
 
 # ---------------------------------------------------------------------------
 # Tests: pad_dataset_to_union_time
@@ -382,6 +472,47 @@ class TestMergeVirtualDatasets:
         merged = merge_virtual_datasets([ds])
         assert "lithk" in merged
         assert merged["lithk"].shape[0] == 86
+
+    def test_merge_spatial_chunks_with_time_mismatch(self):
+        """Merge with multi-spatial-chunk variable and time mismatch (LSCE scenario).
+
+        Verifies that when a spatially-chunked variable (e.g. LSCE_GRISLI2 with
+        (1, 381, 381) chunks on a 761x761 grid) is merged with a variable that
+        has a different time axis, the spatial chunk grid is preserved correctly.
+        """
+        # State variable: 4 timesteps, spatially chunked (2x2 tiles)
+        state_times = [_days_since_2000(y) for y in [2015, 2016, 2017, 2018]]
+        n_time_state = len(state_times)
+        state_var = _make_manifest_var_spatial_chunks(
+            n_time=n_time_state, ny=6, nx=6, chunk_ny=3, chunk_nx=3
+        )
+        time_coord_state = xr.Variable(
+            dims=("time",),
+            data=np.array(state_times, dtype=np.float64),
+            attrs={"units": STANDARD_TIME_UNITS, "calendar": STANDARD_TIME_CALENDAR},
+        )
+        ds_state = xr.Dataset({"lithk": state_var}, coords={"time": time_coord_state})
+
+        # Flux variable: 3 timesteps (one fewer), normal single spatial chunk
+        flux_times = [_days_since_2000(y) for y in [2015, 2016, 2017]]
+        ds_flux = _make_dataset("acabf", flux_times, ny=6, nx=6)
+
+        merged = merge_virtual_datasets([ds_state, ds_flux])
+
+        assert "lithk" in merged
+        assert "acabf" in merged
+
+        # Both should have 4 timesteps (union)
+        assert merged["lithk"].shape[0] == 4
+        assert merged["acabf"].shape[0] == 4
+
+        # lithk chunk shape must be preserved as (1, 3, 3)
+        lithk_chunk_shape = tuple(merged["lithk"].data.metadata.chunk_grid.chunk_shape)
+        assert lithk_chunk_shape == (1, 3, 3), \
+            f"Expected chunk shape (1, 3, 3), got {lithk_chunk_shape}"
+
+        # lithk chunk grid should be (4, 2, 2)
+        assert merged["lithk"].data.manifest.shape_chunk_grid == (4, 2, 2)
 
 
 # ---------------------------------------------------------------------------

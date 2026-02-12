@@ -160,6 +160,10 @@ def _pad_manifest_to_union(
     original manifest entry; missing positions get empty-path chunks that
     resolve to fill_value at read time.
 
+    Preserves the spatial chunk grid from the original manifest. For example,
+    if the source has chunk shape (1, 381, 381) with a 2x2 spatial grid,
+    the padded manifest retains the same spatial chunking.
+
     Parameters
     ----------
     var : xr.Variable
@@ -181,6 +185,14 @@ def _pad_manifest_to_union(
     n_old_time = old_shape[0]
     spatial_shape = old_shape[1:]  # (ny, nx) or similar
 
+    # Preserve the spatial chunk grid from the original manifest.
+    # For contiguous arrays this is (1, 1, ...), but for chunked HDF5 files
+    # (e.g. LSCE_GRISLI2 with chunk shape (1, 381, 381) on a 761x761 grid)
+    # this can be (2, 2) or similar.
+    old_chunk_grid_shape = marr.manifest.shape_chunk_grid  # e.g. (87, 2, 2)
+    spatial_chunk_grid = old_chunk_grid_shape[1:]  # e.g. (2, 2)
+    n_spatial_chunks = int(np.prod(spatial_chunk_grid))
+
     # Build index mapping: for each union timestep, find matching dataset timestep
     # Returns -1 for missing positions
     mapping = np.full(n_union, -1, dtype=np.intp)
@@ -190,8 +202,8 @@ def _pad_manifest_to_union(
         if diffs[best] <= tolerance:
             mapping[i] = best
 
-    # Extract original manifest entries
-    chunk_grid_shape = (n_union,) + (1,) * len(spatial_shape)
+    # New chunk grid preserves spatial chunking
+    chunk_grid_shape = (n_union,) + tuple(spatial_chunk_grid)
 
     paths = np.empty(chunk_grid_shape, dtype=np.dtypes.StringDType())
     # Initialize to empty string (missing chunk)
@@ -200,24 +212,34 @@ def _pad_manifest_to_union(
     offsets = np.zeros(chunk_grid_shape, dtype=np.dtype("uint64"))
     lengths = np.zeros(chunk_grid_shape, dtype=np.dtype("uint64"))
 
-    # Copy entries from original manifest for matched positions
+    # Build a lookup of original entries indexed by chunk grid position.
+    # entries are in C-order (last index varies fastest), matching np.ndindex.
     old_entries = list(marr.manifest.values())
+    old_entries_by_idx = {}
+    for idx, entry in zip(np.ndindex(old_chunk_grid_shape), old_entries):
+        old_entries_by_idx[idx] = entry
+
+    # Copy entries from original manifest for matched positions,
+    # preserving all spatial chunks per timestep.
     for i, src_idx in enumerate(mapping):
         if src_idx >= 0:
-            entry = old_entries[src_idx]
-            idx = (i,) + (0,) * len(spatial_shape)
-            paths[idx] = entry["path"]
-            offsets[idx] = entry["offset"]
-            lengths[idx] = entry["length"]
+            for spatial_idx in np.ndindex(tuple(spatial_chunk_grid)):
+                old_key = (src_idx,) + spatial_idx
+                entry = old_entries_by_idx.get(old_key)
+                if entry is not None:
+                    new_key = (i,) + spatial_idx
+                    paths[new_key] = entry["path"]
+                    offsets[new_key] = entry["offset"]
+                    lengths[new_key] = entry["length"]
 
     new_manifest = ChunkManifest.from_arrays(
         paths=paths, offsets=offsets, lengths=lengths, validate_paths=False
     )
 
-    # Update metadata: new shape, fill_value=NaN
+    # Update metadata: new shape, fill_value=NaN, preserve original chunk shape
     new_shape = (n_union,) + spatial_shape
-    chunk_shape = (1,) + spatial_shape
-    new_chunk_grid = RegularChunkGrid(chunk_shape=chunk_shape)
+    original_chunk_shape = tuple(marr.metadata.chunk_grid.chunk_shape)
+    new_chunk_grid = RegularChunkGrid(chunk_shape=original_chunk_shape)
     new_metadata = dataclasses.replace(
         marr.metadata,
         shape=new_shape,
