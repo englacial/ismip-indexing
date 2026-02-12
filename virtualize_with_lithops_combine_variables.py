@@ -207,6 +207,7 @@ def virtualize_and_combine_batch(urls: List[str], registry: ObjectStoreRegistry,
 
     # virtualize and append all needed metadata (for now just the variable)
     vdatasets = []
+    nc3_fallbacks = []
     for url in urls:
         # Try HDF5 (NetCDF4) first, fall back to NetCDF3. Some batches contain
         # a mix of formats (e.g. LSCE/GRISLI2/hist_std has both HDF5 and NetCDF3 files).
@@ -220,7 +221,10 @@ def virtualize_and_combine_batch(urls: List[str], registry: ObjectStoreRegistry,
                 loadable_variables=loadable_variables,
                 decode_times=False
             )
-        except Exception:
+        except Exception as hdf5_err:
+            logger.warning("HDF5 parse failed for %s: %s — falling back to NetCDF3 download",
+                           os.path.basename(url), hdf5_err)
+            nc3_fallbacks.append(os.path.basename(url))
             vds_var = _open_netcdf3_via_download(url, s3_store, registry, loadable_variables)
         # apply ismip specific fixer functions
         # fix_time_encoding cleans up malformed attributes (typos, missing calendar, etc.)
@@ -236,7 +240,7 @@ def virtualize_and_combine_batch(urls: List[str], registry: ObjectStoreRegistry,
     # Rechunk, pad to union time axis, and merge
     vds = ismip6_helper.merge_virtual_datasets(vdatasets)
 
-    return vds
+    return vds, nc3_fallbacks
 
 
 def batch_virt_func(batch: Tuple[Tuple[str], List[Dict[str, Union[str, int]]]]) -> Dict[str, Any]:
@@ -246,11 +250,12 @@ def batch_virt_func(batch: Tuple[Tuple[str], List[Dict[str, Union[str, int]]]]) 
         store = obstore.store.from_url(bucket, skip_signature=True)
         registry = ObjectStoreRegistry({bucket: store})
         bin_time = batch.get('bin_time', True)
-        vds = virtualize_and_combine_batch(batch['urls'], registry, bin_time=bin_time)
+        vds, nc3_fallbacks = virtualize_and_combine_batch(batch['urls'], registry, bin_time=bin_time)
         return {
                 'success': True,
                 'batch': batch,
-                'virtual_dataset': vds
+                'virtual_dataset': vds,
+                'nc3_fallbacks': nc3_fallbacks,
             }
 
     except Exception as e:
@@ -655,6 +660,15 @@ def process_all_files(
     print(f"Virtualization: {len(successful_results)} successful, {len(failed_results)} failed")
     for r in failed_results:
         print(f"  FAIL: {get_id_from_batch(r['batch'])}: {r.get('error', '')[:200]}")
+
+    # Report NetCDF3 fallbacks (each one downloads the full file — major perf hit)
+    total_nc3 = sum(len(r.get('nc3_fallbacks', [])) for r in successful_results)
+    if total_nc3 > 0:
+        print(f"\nNetCDF3 fallbacks: {total_nc3} files across batches (each downloads full file to Lambda):")
+        for r in successful_results:
+            fb = r.get('nc3_fallbacks', [])
+            if fb:
+                print(f"  {get_id_from_batch(r['batch'])}: {len(fb)} files — {', '.join(fb)}")
 
     # Step 4: Write virtual datasets to icechunk
     # Group by model prefix (e.g. "AWI_PISM1") so experiments within the same
