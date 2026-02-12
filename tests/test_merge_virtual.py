@@ -18,6 +18,7 @@ from ismip6_helper.merge_virtual import (
     merge_virtual_datasets,
     pad_dataset_to_union_time,
     _pad_manifest_to_union,
+    _pad_manifest_chunks_to_union,
 )
 from ismip6_helper.time_utils import STANDARD_TIME_UNITS, STANDARD_TIME_CALENDAR
 
@@ -377,19 +378,32 @@ class TestPadDatasetToUnionTime:
         # hfgeoubed should still be 2D
         assert padded["hfgeoubed"].dims == ("y", "x")
 
-    def test_compressed_dropped_with_warning(self, caplog):
-        """Variables with non-per-timestep chunks are dropped when time mismatches."""
+    def test_compressed_padded_when_union_longer(self):
+        """Compressed vars are chunk-level padded when union is a superset."""
         times = [_days_since_2000(y) for y in [2015, 2016, 2017]]
         ds = _make_dataset("compressed_var", times, per_timestep=False)
 
         union_time = np.array([_days_since_2000(y) for y in [2015, 2016, 2017, 2018]])
+        padded = pad_dataset_to_union_time(ds, union_time)
+
+        # Variable is now chunk-level padded (not dropped)
+        assert "compressed_var" in padded.data_vars
+        assert padded["compressed_var"].shape[0] == 4
+
+    def test_compressed_dropped_when_union_needs_fewer_chunks(self, caplog):
+        """Compressed vars are dropped when union requires fewer time chunks."""
+        # Variable with multi-timestep chunks: 90 steps, chunk_time=18 → 5 time chunks
+        times = [_days_since_2000(y) for y in range(2015, 2105)]
+        ds = _make_dataset_multi_time_chunks("compressed_var", times, time_chunk_size=18)
+
+        # Union has only 17 steps → ceil(17/18)=1 chunk < 5 original chunks
+        union_time = np.array([_days_since_2000(y) for y in range(2015, 2032)])
 
         with caplog.at_level(logging.WARNING, logger="ismip6_helper.merge_virtual"):
             padded = pad_dataset_to_union_time(ds, union_time)
 
-        # Variable can't be padded and has mismatched time dim, so it's dropped
         assert "compressed_var" not in padded.data_vars
-        assert "compressed time chunks" in caplog.text
+        assert "union is shorter" in caplog.text
 
     def test_compressed_kept_when_time_matches(self):
         """Compressed variables are kept if their time dim matches the union."""
@@ -513,6 +527,186 @@ class TestMergeVirtualDatasets:
 
         # lithk chunk grid should be (4, 2, 2)
         assert merged["lithk"].data.manifest.shape_chunk_grid == (4, 2, 2)
+
+
+# ---------------------------------------------------------------------------
+# Helpers for multi-timestep chunk tests
+# ---------------------------------------------------------------------------
+
+def _make_manifest_var_multi_time_chunks(
+    n_time, time_chunk_size=18, ny=9, nx=9, chunk_ny=3, chunk_nx=3,
+):
+    """Create a ManifestArray with multi-timestep AND multi-spatial chunks.
+
+    Simulates BISICLES-style files with chunk_shape (18, 153, 153) and
+    chunk_grid (5, 5, 5) covering 90 timesteps.
+
+    Returns an xr.Variable backed by a ManifestArray with shape (n_time, ny, nx)
+    and chunk_shape (time_chunk_size, chunk_ny, chunk_nx).
+    """
+    import math
+
+    n_chunks_t = math.ceil(n_time / time_chunk_size)
+    n_chunks_y = math.ceil(ny / chunk_ny)
+    n_chunks_x = math.ceil(nx / chunk_nx)
+    chunk_grid_shape = (n_chunks_t, n_chunks_y, n_chunks_x)
+
+    paths = np.empty(chunk_grid_shape, dtype=np.dtypes.StringDType())
+    offsets = np.empty(chunk_grid_shape, dtype=np.dtype("uint64"))
+    lengths = np.empty(chunk_grid_shape, dtype=np.dtype("uint64"))
+
+    cursor = 1000
+    for tc in range(n_chunks_t):
+        for cy in range(n_chunks_y):
+            for cx in range(n_chunks_x):
+                paths[tc, cy, cx] = "s3://bucket/data.nc"
+                offsets[tc, cy, cx] = cursor
+                chunk_bytes = time_chunk_size * chunk_ny * chunk_nx * 8 // 2
+                lengths[tc, cy, cx] = chunk_bytes
+                cursor += chunk_bytes
+
+    manifest = ChunkManifest.from_arrays(
+        paths=paths, offsets=offsets, lengths=lengths, validate_paths=False
+    )
+
+    metadata = create_v3_array_metadata(
+        shape=(n_time, ny, nx),
+        data_type=np.dtype("float64"),
+        chunk_shape=(time_chunk_size, chunk_ny, chunk_nx),
+    )
+
+    marr = ManifestArray(metadata=metadata, chunkmanifest=manifest)
+    return xr.Variable(dims=("time", "y", "x"), data=marr)
+
+
+def _make_dataset_multi_time_chunks(var_name, time_values, **kwargs):
+    """Build a virtual dataset with a multi-timestep-chunk ManifestArray."""
+    n_time = len(time_values)
+    var = _make_manifest_var_multi_time_chunks(n_time, **kwargs)
+    time_coord = xr.Variable(
+        dims=("time",),
+        data=np.array(time_values, dtype=np.float64),
+        attrs={"units": STANDARD_TIME_UNITS, "calendar": STANDARD_TIME_CALENDAR},
+    )
+    return xr.Dataset({var_name: var}, coords={"time": time_coord})
+
+
+# ---------------------------------------------------------------------------
+# Tests: garbage time value filtering
+# ---------------------------------------------------------------------------
+
+class TestGarbageTimeValues:
+    def test_garbage_filtered_from_union(self):
+        """NaN and extreme values should be excluded from union time axis."""
+        clean = [_days_since_2000(y) for y in range(2015, 2106)]  # 91 steps
+        garbage = [np.nan, 1e219, -1e200, 5e100, np.inf]
+
+        ds_clean = _make_dataset("lithk", clean)
+        ds_garbage = _make_dataset("lim", garbage)
+
+        union = compute_union_time_axis([ds_clean, ds_garbage])
+        # All garbage values filtered (NaN, Inf, and values with |v| > 100,000)
+        assert len(union) == 91
+        assert np.all(np.isfinite(union))
+        assert np.all(np.abs(union) <= 100_000)
+
+    def test_bisicles_state_scenario(self):
+        """BISICLES state-only: 20 vars, 2 with garbage time → clean union."""
+        state_times = [_days_since_2000(y) for y in range(2015, 2105)]  # 90 steps
+
+        datasets = []
+        # 18 clean state variables
+        for i in range(18):
+            datasets.append(_make_dataset(f"var_{i}", state_times))
+
+        # 2 garbage-time variables (lim, limnsw) with values far out of range
+        garbage_times = [1e219] * 5 + [np.nan] * 5
+        for name in ["lim", "limnsw"]:
+            ds = _make_dataset(name, garbage_times)
+            datasets.append(ds)
+
+        union = compute_union_time_axis(datasets)
+        # Union should be exactly 90 clean steps (all garbage filtered out)
+        assert len(union) == 90
+
+        np.testing.assert_allclose(
+            union,
+            np.array(state_times),
+            atol=0.5,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tests: multi-timestep chunk padding
+# ---------------------------------------------------------------------------
+
+class TestMultiTimestepChunkPadding:
+    def test_pad_append_one_chunk(self):
+        """90→91 with chunk_time=18 produces 6 time chunks (ceil(91/18)=6)."""
+        import math
+
+        ds_time = np.array([_days_since_2000(y) for y in range(2015, 2105)])  # 90
+        union_time = np.array([_days_since_2000(y) for y in range(2015, 2106)])  # 91
+
+        var = _make_manifest_var_multi_time_chunks(90, time_chunk_size=18, ny=9, nx=9, chunk_ny=3, chunk_nx=3)
+        padded = _pad_manifest_chunks_to_union(var, union_time, ds_time)
+        marr = padded.data
+
+        assert marr.shape == (91, 9, 9)
+        assert marr.manifest.shape_chunk_grid[0] == math.ceil(91 / 18)  # 6
+
+    def test_existing_chunks_preserved(self):
+        """Original chunk entries should be at their correct positions."""
+        ds_time = np.array([_days_since_2000(y) for y in range(2015, 2105)])  # 90
+        union_time = np.array([_days_since_2000(y) for y in range(2015, 2106)])  # 91
+
+        var = _make_manifest_var_multi_time_chunks(90, time_chunk_size=18, ny=9, nx=9, chunk_ny=3, chunk_nx=3)
+
+        orig_entries = list(var.data.manifest.values())
+        padded = _pad_manifest_chunks_to_union(var, union_time, ds_time)
+        padded_entries = list(padded.data.manifest.values())
+
+        # Original had 5 time chunks × 3 × 3 spatial = 45 entries
+        assert len(orig_entries) == 45
+
+        # First 45 entries in padded should match original (same time-chunk positions)
+        for i in range(45):
+            assert padded_entries[i]["offset"] == orig_entries[i]["offset"], \
+                f"Entry {i}: expected offset {orig_entries[i]['offset']}, got {padded_entries[i]['offset']}"
+            assert padded_entries[i]["path"] == orig_entries[i]["path"]
+
+    def test_chunk_shape_preserved(self):
+        """Chunk shape (18, 3, 3) should be unchanged after padding."""
+        ds_time = np.array([_days_since_2000(y) for y in range(2015, 2105)])  # 90
+        union_time = np.array([_days_since_2000(y) for y in range(2015, 2106)])  # 91
+
+        var = _make_manifest_var_multi_time_chunks(90, time_chunk_size=18, ny=9, nx=9, chunk_ny=3, chunk_nx=3)
+        padded = _pad_manifest_chunks_to_union(var, union_time, ds_time)
+
+        assert tuple(padded.data.metadata.chunk_grid.chunk_shape) == (18, 3, 3)
+
+    def test_bisicles_combined_scenario(self):
+        """End-to-end: state=90, flux=91 → all data vars survive merge."""
+        state_times = [_days_since_2000(y) for y in range(2015, 2105)]  # 90
+        flux_times = [_days_since_2000(y) for y in range(2015, 2106)]   # 91
+
+        # State vars: multi-timestep chunks (90 steps, chunk_time=18)
+        ds_state = _make_dataset_multi_time_chunks(
+            "lithk", state_times, time_chunk_size=18, ny=9, nx=9, chunk_ny=3, chunk_nx=3,
+        )
+
+        # Flux vars: per-timestep chunks (91 steps) — must match spatial dims
+        ds_flux = _make_dataset("acabf", flux_times, ny=9, nx=9)
+
+        merged = merge_virtual_datasets([ds_state, ds_flux])
+
+        assert "lithk" in merged
+        assert "acabf" in merged
+        # Both padded to 91 (union)
+        assert merged["lithk"].shape[0] == 91
+        assert merged["acabf"].shape[0] == 91
+        # lithk chunk shape preserved
+        assert tuple(merged["lithk"].data.metadata.chunk_grid.chunk_shape) == (18, 3, 3)
 
 
 # ---------------------------------------------------------------------------

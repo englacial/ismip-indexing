@@ -168,24 +168,74 @@ def normalize_time_encoding(
 
     raw_values = time_var.values
 
+    # Early-reject variables with garbage raw time values (e.g. BISICLES
+    # lim/limnsw with uninitialized memory: 2.31e-310, 1.71e+219).
+    raw_flat = np.asarray(raw_values, dtype=np.float64).ravel()
+    if np.any(~np.isfinite(raw_flat)):
+        logger.warning("Time values contain NaN/Inf, skipping normalization")
+        return ds
+    if len(raw_flat) > 0 and np.max(np.abs(raw_flat)) > 1e15:
+        logger.warning(
+            "Time values have extreme magnitude (max=%.2e), skipping normalization",
+            np.max(np.abs(raw_flat)),
+        )
+        return ds
+
     # Handle "day as %Y%m%d.%f" packed format
     if 'as %Y' in str(original_units):
-        if verbose:
-            print(f"  - Decoding packed date format: {original_units}")
-        dates = []
-        for v in raw_values.flat:
-            date_int = int(v)
-            y = date_int // 10000
-            m = (date_int % 10000) // 100
-            d = date_int % 100
-            if d < 1:
-                d = 1
-            if m < 1:
-                m = 1
-            if m > 12:
-                y += (m - 1) // 12
-                m = (m - 1) % 12 + 1
-            dates.append(cftime.datetime(y, m, d, calendar=target_calendar))
+        # Valid packed YYYYMMDD dates are 8-digit numbers (>= 18500101).
+        # If max(raw_values) < 18500101, the values are day offsets, not
+        # packed dates (e.g. NCAR_CISM exp07: 0–31301 with units
+        # "day as %Y%m%d.%f" but actually meaning days since some epoch).
+        max_val = float(np.max(np.abs(raw_flat)))
+
+        if max_val >= 18500101:
+            # Real packed YYYYMMDD dates
+            if verbose:
+                print(f"  - Decoding packed date format: {original_units}")
+            dates = []
+            for v in raw_values.flat:
+                date_int = int(v)
+                y = date_int // 10000
+                m = (date_int % 10000) // 100
+                d = date_int % 100
+                if d < 1:
+                    d = 1
+                if m < 1:
+                    m = 1
+                if m > 12:
+                    y += (m - 1) // 12
+                    m = (m - 1) % 12 + 1
+                dates.append(cftime.datetime(y, m, d, calendar=target_calendar))
+        else:
+            # Values are day offsets, not packed YYYYMMDD.
+            # Try common ISMIP6 reference epochs to find one that
+            # produces dates in the plausible 1850–2200 range.
+            if verbose:
+                print(f"  - Packed date format with small values (max={max_val:.0f}), trying epoch detection")
+            candidate_epochs = [
+                "days since 2015-01-01",  # projection start
+                "days since 2006-01-01",  # historical run start
+                "days since 1950-01-01",  # climate convention
+                "days since 0001-01-01",  # generic fallback
+            ]
+            dates = None
+            for epoch in candidate_epochs:
+                try:
+                    trial = cftime.num2date(raw_values, units=epoch, calendar=target_calendar)
+                    years = [d.year for d in np.asarray(trial).flat]
+                    if all(1850 <= y <= 2200 for y in years):
+                        dates = trial
+                        logger.info("Packed date format with small values; matched epoch '%s'", epoch)
+                        break
+                except Exception:
+                    continue
+            if dates is None:
+                logger.warning(
+                    "Could not determine epoch for '%s' (max=%.0f)",
+                    original_units, max_val,
+                )
+                return ds
     else:
         # Detect mislabeled calendars: if the calendar claims to be
         # standard/gregorian/proleptic_gregorian but the time steps are
