@@ -44,6 +44,11 @@ jobs:
       - run: uv sync --extra dev
 
       - name: Rebuild Lambda runtime with updated ismip6_helper
+        env:
+          # Disable buildx attestations (provenance/SBOM) which produce OCI
+          # manifest lists that AWS Lambda rejects. Lambda requires a simple
+          # Docker V2 image manifest, not a multi-entry index.
+          BUILDX_NO_DEFAULT_ATTESTATIONS: 1
         run: |
           # Delete existing runtime to force fresh build (ignore error if not exists)
           uv run lithops runtime delete ismip6-icechunk -c lithops_aws.yaml || true
