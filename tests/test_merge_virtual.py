@@ -173,6 +173,22 @@ def _make_dataset(var_name, time_values, ny=3, nx=3, per_timestep=True):
     )
 
 
+def _make_dataset_unnormalized(var_name, time_values, ny=3, nx=3, per_timestep=True,
+                                units="days since 1995-01-01", calendar="365_day"):
+    """Build a dataset with non-standard time encoding (simulating failed normalization)."""
+    n_time = len(time_values)
+    var = _make_manifest_var(n_time, ny, nx, per_timestep=per_timestep)
+    time_coord = xr.Variable(
+        dims=("time",),
+        data=np.array(time_values, dtype=np.float64),
+        attrs={"units": units, "calendar": calendar},
+    )
+    return xr.Dataset(
+        {var_name: var},
+        coords={"time": time_coord},
+    )
+
+
 # ---------------------------------------------------------------------------
 # Tests: bin_time_to_year
 # ---------------------------------------------------------------------------
@@ -596,37 +612,57 @@ def _make_dataset_multi_time_chunks(var_name, time_values, **kwargs):
 # ---------------------------------------------------------------------------
 
 class TestGarbageTimeValues:
-    def test_garbage_filtered_from_union(self):
-        """NaN and extreme values should be excluded from union time axis."""
+    def test_unnormalized_excluded_from_union(self):
+        """Datasets with non-standard time encoding are excluded from the union."""
         clean = [_days_since_2000(y) for y in range(2015, 2106)]  # 91 steps
+        # After normalize_time_encoding fails, garbage-time datasets keep their
+        # original (non-standard) encoding attrs. These should be excluded entirely
+        # — not filtered by value magnitude.
         garbage = [np.nan, 1e219, -1e200, 5e100, np.inf]
 
         ds_clean = _make_dataset("lithk", clean)
-        ds_garbage = _make_dataset("lim", garbage)
+        ds_garbage = _make_dataset_unnormalized("lim", garbage)
 
         union = compute_union_time_axis([ds_clean, ds_garbage])
-        # All garbage values filtered (NaN, Inf, and values with |v| > 100,000)
         assert len(union) == 91
         assert np.all(np.isfinite(union))
-        assert np.all(np.abs(union) <= 100_000)
+
+    def test_subnormal_garbage_excluded_by_metadata(self):
+        """Subnormal floats (≈0.0) from uninitialized memory are excluded via metadata check.
+
+        This is the specific failure mode from BISICLES: 2.31e-310 passes any
+        value-magnitude filter but should be excluded because the dataset's time
+        encoding is non-standard (normalization failed).
+        """
+        clean = [_days_since_2000(y) for y in range(2015, 2106)]  # 91 steps
+        # Subnormal values that would pass a |v| <= 100,000 filter
+        subnormal_garbage = [2.31e-310, 5e-311, 0.0, 1e-300, 3e-320]
+
+        ds_clean = _make_dataset("lithk", clean)
+        ds_garbage = _make_dataset_unnormalized("lim", subnormal_garbage)
+
+        union = compute_union_time_axis([ds_clean, ds_garbage])
+        # The near-zero garbage must NOT appear in the union
+        assert len(union) == 91
+        # No values near zero (smallest valid ISMIP6 value is ~-55000 for year 1850)
+        assert np.all(union > 1000)
 
     def test_bisicles_state_scenario(self):
         """BISICLES state-only: 20 vars, 2 with garbage time → clean union."""
         state_times = [_days_since_2000(y) for y in range(2015, 2105)]  # 90 steps
 
         datasets = []
-        # 18 clean state variables
+        # 18 clean state variables (normalized encoding)
         for i in range(18):
             datasets.append(_make_dataset(f"var_{i}", state_times))
 
-        # 2 garbage-time variables (lim, limnsw) with values far out of range
+        # 2 garbage-time variables with non-standard encoding (normalization failed)
         garbage_times = [1e219] * 5 + [np.nan] * 5
         for name in ["lim", "limnsw"]:
-            ds = _make_dataset(name, garbage_times)
+            ds = _make_dataset_unnormalized(name, garbage_times)
             datasets.append(ds)
 
         union = compute_union_time_axis(datasets)
-        # Union should be exactly 90 clean steps (all garbage filtered out)
         assert len(union) == 90
 
         np.testing.assert_allclose(
@@ -634,6 +670,18 @@ class TestGarbageTimeValues:
             np.array(state_times),
             atol=0.5,
         )
+
+    def test_padding_skipped_for_unnormalized_time(self):
+        """pad_dataset_to_union_time strips time-dependent vars from non-normalized datasets."""
+        garbage = [2.31e-310, 1.71e+219, 0.0, np.nan, 5e100]
+        ds = _make_dataset_unnormalized("lim", garbage)
+
+        union_time = np.array([_days_since_2000(y) for y in range(2015, 2106)])
+        result = pad_dataset_to_union_time(ds, union_time)
+
+        # Time-dependent variables should be stripped (not padded with empty manifests)
+        assert "lim" not in result.data_vars
+        assert "time" not in result.coords
 
 
 # ---------------------------------------------------------------------------
@@ -707,6 +755,49 @@ class TestMultiTimestepChunkPadding:
         assert merged["acabf"].shape[0] == 91
         # lithk chunk shape preserved
         assert tuple(merged["lithk"].data.metadata.chunk_grid.chunk_shape) == (18, 3, 3)
+
+    def test_bisicles_with_garbage_lim_scenario(self):
+        """End-to-end BISICLES: normal vars + garbage-time lim/limnsw.
+
+        This reproduces the actual failure: lim/limnsw have garbage time values
+        from uninitialized memory (including subnormals ≈ 0.0 that pass any
+        magnitude filter). After normalize_time_encoding fails, their attrs are
+        non-standard. The fix: exclude them from the union by checking encoding
+        metadata, not value magnitude.
+        """
+        state_times = [_days_since_2000(y) for y in range(2015, 2105)]  # 90
+        flux_times = [_days_since_2000(y) for y in range(2015, 2106)]   # 91
+
+        # Normal state var with multi-timestep chunks
+        ds_state = _make_dataset_multi_time_chunks(
+            "lithk", state_times, time_chunk_size=18, ny=9, nx=9, chunk_ny=3, chunk_nx=3,
+        )
+
+        # Normal flux var with per-timestep chunks
+        ds_flux = _make_dataset("acabf", flux_times, ny=9, nx=9)
+
+        # Garbage-time lim/limnsw: subnormal values that would pass magnitude filters,
+        # but have non-standard encoding attrs (normalization failed)
+        garbage_times = [2.31e-310, 1.71e+219, 0.0, np.nan, 5e-300]
+        ds_lim = _make_dataset_unnormalized("lim", garbage_times, ny=9, nx=9)
+        ds_limnsw = _make_dataset_unnormalized("limnsw", garbage_times, ny=9, nx=9)
+
+        merged = merge_virtual_datasets([ds_state, ds_flux, ds_lim, ds_limnsw])
+
+        # Normal variables should be present and correctly padded
+        assert "lithk" in merged
+        assert "acabf" in merged
+        assert merged["lithk"].shape[0] == 91
+        assert merged["acabf"].shape[0] == 91
+
+        # lithk chunks should have real data (not all-empty manifests)
+        lithk_entries = list(merged["lithk"].data.manifest.values())
+        real_entries = [e for e in lithk_entries if e["path"] != ""]
+        assert len(real_entries) > 0, "lithk should have real chunk manifests"
+
+        # Garbage variables should be excluded (lim/limnsw have mismatched time dim)
+        assert "lim" not in merged.data_vars
+        assert "limnsw" not in merged.data_vars
 
 
 # ---------------------------------------------------------------------------

@@ -338,15 +338,6 @@ def batch_write_func(batch: Tuple[Tuple[str], List[Dict[str, Union[str, int]]]],
             if attempt > 0:
                 print(f"    {path}: succeeded on attempt {attempt + 1}")
 
-            # Post-write annotation: detect and annotate ignore values
-            try:
-                annotated = ismip6_helper.annotate_store_group(repo, path)
-                if annotated:
-                    print(f"    {path}: annotated ignore_value attrs")
-            except Exception as ann_err:
-                # Annotation failure is non-fatal — the data is already written
-                print(f"    {path}: ignore_value annotation failed (non-fatal): {ann_err}")
-
             return {
                 'success': True,
                 'batch': batch,
@@ -507,6 +498,65 @@ def print_cost_summary(cost_stats: dict, s3_put_count: int = 0):
         print(f"S3 PUT requests (~{s3_put_count}): ${s3_cost:.4f}")
     print(f"Estimated total cost: ${total:.4f}")
     print("--------------------")
+
+
+def annotate_all_groups(
+    local_storage: bool = False,
+    cloud_backend: str = "aws",
+    write_creds: str = None,
+    store_type: str = "combined",
+):
+    """Walk all groups in the store and annotate ignore_value attrs.
+
+    Designed to run as a separate pass after the write pipeline completes,
+    with fresh credentials. Skips variables that already have ignore_value set.
+    """
+    store_config = STORE_TYPE_CONFIG[store_type]
+    group_prefix = store_config["group_prefix"]
+
+    repo_kwargs = get_repo_kwargs(
+        local_storage=local_storage,
+        cloud_backend=cloud_backend,
+        write_creds=write_creds,
+    )
+    repo = icechunk.Repository.open_or_create(**repo_kwargs)
+    session = repo.readonly_session(branch="main")
+    root = zarr.open(session.store, mode="r")
+
+    # Discover all experiment groups: group_prefix/Model_Name/experiment
+    try:
+        top = root[group_prefix]
+    except KeyError:
+        print(f"No '{group_prefix}' group found in store, nothing to annotate.")
+        return
+
+    groups_to_annotate = []
+    for model_name in top.keys():
+        model_group = top[model_name]
+        if not isinstance(model_group, zarr.Group):
+            continue
+        for exp_name in model_group.keys():
+            groups_to_annotate.append(f"{group_prefix}/{model_name}/{exp_name}")
+
+    print(f"Annotating ignore_value for {len(groups_to_annotate)} groups in '{group_prefix}'...")
+    annotated_count = 0
+    skipped_count = 0
+    failed_count = 0
+
+    for group_path in groups_to_annotate:
+        try:
+            result = ismip6_helper.annotate_store_group(repo, group_path)
+            if result:
+                annotated_count += 1
+                print(f"  [ANNOTATED] {group_path}")
+            else:
+                skipped_count += 1
+        except Exception as e:
+            failed_count += 1
+            print(f"  [FAIL] {group_path}: {e}")
+
+    print(f"\nAnnotation complete: {annotated_count} annotated, "
+          f"{skipped_count} already done/nothing to do, {failed_count} failed")
 
 
 def get_id_from_batch(batch):
@@ -818,6 +868,11 @@ if __name__ == "__main__":
              "'combined' (all variables, year-binned), 'state' (ST variables only), or "
              "'flux' (FL variables only). Default: all."
     )
+    parser.add_argument(
+        "--annotate-only", action="store_true",
+        help="Skip the write pipeline and only run ignore_value annotation on existing groups. "
+             "Use this after the main pipeline completes, with fresh credentials."
+    )
     args = parser.parse_args()
 
     # Infer backend from config, or default based on config filename
@@ -828,17 +883,30 @@ if __name__ == "__main__":
         cloud_backend = infer_cloud_backend(args.config)
         local_execution = args.local_execution
 
+    if args.store_type == "all":
+        store_types = ["combined", "state", "flux"]
+    else:
+        store_types = [args.store_type]
+
+    # --annotate-only: skip the write pipeline, just annotate existing groups
+    if args.annotate_only:
+        for st in store_types:
+            print(f"\n{'='*60}\nAnnotating store type: {st}\n{'='*60}")
+            annotate_all_groups(
+                local_storage=args.local_storage,
+                cloud_backend=cloud_backend,
+                write_creds=args.write_creds,
+                store_type=st,
+            )
+        import sys
+        sys.exit(0)
+
     # Default: concurrent writes on AWS, sequential on GCP (due to rate limits)
     concurrent_writes = not args.sequential_writes
     if cloud_backend == "gcp" and not args.sequential_writes:
         print("Note: GCP backend detected. Using sequential writes by default "
               "(GCS rate-limits ref file mutations). Pass --sequential-writes=false to override.")
         concurrent_writes = False
-
-    if args.store_type == "all":
-        store_types = ["combined", "state", "flux"]
-    else:
-        store_types = [args.store_type]
 
     if len(store_types) > 1:
         # Run each store type in a separate subprocess to ensure full cleanup
