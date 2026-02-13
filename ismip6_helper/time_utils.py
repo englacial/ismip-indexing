@@ -161,31 +161,134 @@ def normalize_time_encoding(
     original_units = attrs.get('units')
     original_calendar = attrs.get('calendar', '365_day')
 
-    if not original_units:
-        if verbose:
-            print("  - No units on time variable, skipping normalization")
-        return ds
-
     raw_values = time_var.values
+
+    if not original_units:
+        # No units attribute — try epoch detection for plausible day offsets.
+        # BISICLES files often have time values that are day offsets from some
+        # epoch but lack the 'units' and 'calendar' attrs entirely.
+        raw_flat = np.asarray(raw_values, dtype=np.float64).ravel()
+        if len(raw_flat) == 0 or np.any(~np.isfinite(raw_flat)):
+            if verbose:
+                print("  - No units on time variable and values not finite, skipping")
+            return ds
+
+        max_abs = np.max(np.abs(raw_flat))
+        if max_abs > 1e6:
+            # Values too large to be plausible day offsets (max ~200k for 1850-2200)
+            if verbose:
+                print(f"  - No units on time variable and values too large (max={max_abs:.2e}), skipping")
+            return ds
+
+        # Try candidate epochs to find one that produces dates in 1850-2200
+        candidate_epochs = [
+            "days since 2015-01-01",  # ISMIP6 projection start
+            "days since 2014-01-01",  # common BISICLES epoch
+            "days since 2006-01-01",  # historical run start
+            "days since 2000-01-01",  # common reference
+            "days since 1950-01-01",  # climate convention
+            "days since 0001-01-01",  # generic fallback
+        ]
+        matched_epoch = None
+        for epoch in candidate_epochs:
+            try:
+                trial = cftime.num2date(raw_values, units=epoch, calendar=target_calendar)
+                years = [d.year for d in np.asarray(trial).flat]
+                if all(1850 <= y <= 2200 for y in years):
+                    matched_epoch = epoch
+                    break
+            except Exception:
+                continue
+
+        if matched_epoch is None:
+            if verbose:
+                print(f"  - No units on time variable and no epoch matched, skipping")
+            logger.warning(
+                "No units on time variable and no candidate epoch produced valid dates "
+                "(max_abs=%.2e, n_values=%d)", max_abs, len(raw_flat),
+            )
+            return ds
+
+        logger.info(
+            "No units on time variable; detected epoch '%s' from raw values", matched_epoch,
+        )
+        if verbose:
+            print(f"  - Detected epoch '{matched_epoch}' for unitless time variable")
+
+        # Set the detected encoding so the standard path below can handle it
+        original_units = matched_epoch
+        original_calendar = target_calendar
+        attrs['units'] = original_units
+        attrs['calendar'] = original_calendar
+
+    # Early-reject variables with garbage raw time values (e.g. BISICLES
+    # lim/limnsw with uninitialized memory: 2.31e-310, 1.71e+219).
+    raw_flat = np.asarray(raw_values, dtype=np.float64).ravel()
+    if np.any(~np.isfinite(raw_flat)):
+        logger.warning("Time values contain NaN/Inf, skipping normalization")
+        return ds
+    if len(raw_flat) > 0 and np.max(np.abs(raw_flat)) > 1e15:
+        logger.warning(
+            "Time values have extreme magnitude (max=%.2e), skipping normalization",
+            np.max(np.abs(raw_flat)),
+        )
+        return ds
 
     # Handle "day as %Y%m%d.%f" packed format
     if 'as %Y' in str(original_units):
-        if verbose:
-            print(f"  - Decoding packed date format: {original_units}")
-        dates = []
-        for v in raw_values.flat:
-            date_int = int(v)
-            y = date_int // 10000
-            m = (date_int % 10000) // 100
-            d = date_int % 100
-            if d < 1:
-                d = 1
-            if m < 1:
-                m = 1
-            if m > 12:
-                y += (m - 1) // 12
-                m = (m - 1) % 12 + 1
-            dates.append(cftime.datetime(y, m, d, calendar=target_calendar))
+        # Valid packed YYYYMMDD dates are 8-digit numbers (>= 18500101).
+        # If max(raw_values) < 18500101, the values are day offsets, not
+        # packed dates (e.g. NCAR_CISM exp07: 0–31301 with units
+        # "day as %Y%m%d.%f" but actually meaning days since some epoch).
+        max_val = float(np.max(np.abs(raw_flat)))
+
+        if max_val >= 18500101:
+            # Real packed YYYYMMDD dates
+            if verbose:
+                print(f"  - Decoding packed date format: {original_units}")
+            dates = []
+            for v in raw_values.flat:
+                date_int = int(v)
+                y = date_int // 10000
+                m = (date_int % 10000) // 100
+                d = date_int % 100
+                if d < 1:
+                    d = 1
+                if m < 1:
+                    m = 1
+                if m > 12:
+                    y += (m - 1) // 12
+                    m = (m - 1) % 12 + 1
+                dates.append(cftime.datetime(y, m, d, calendar=target_calendar))
+        else:
+            # Values are day offsets, not packed YYYYMMDD.
+            # Try common ISMIP6 reference epochs to find one that
+            # produces dates in the plausible 1850–2200 range.
+            if verbose:
+                print(f"  - Packed date format with small values (max={max_val:.0f}), trying epoch detection")
+            candidate_epochs = [
+                "days since 2015-01-01",  # projection start
+                "days since 2006-01-01",  # historical run start
+                "days since 1950-01-01",  # climate convention
+                "days since 0001-01-01",  # generic fallback
+            ]
+            dates = None
+            for epoch in candidate_epochs:
+                try:
+                    trial = cftime.num2date(raw_values, units=epoch, calendar=target_calendar)
+                    years = [d.year for d in np.asarray(trial).flat]
+                    if all(1850 <= y <= 2200 for y in years):
+                        dates = trial
+                        logger.info("Packed date format with small values; matched epoch '%s'", epoch)
+                        break
+                except Exception:
+                    continue
+            if dates is None:
+                logger.warning(
+                    "Could not determine epoch for '%s' (max=%.0f)",
+                    original_units, max_val,
+                )
+                return ds
     else:
         # Detect mislabeled calendars: if the calendar claims to be
         # standard/gregorian/proleptic_gregorian but the time steps are

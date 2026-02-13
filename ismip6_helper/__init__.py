@@ -52,6 +52,12 @@ from .variable_classification import (
     get_temporal_type,
 )
 
+from .ignore_value import (
+    detect_ignore_value,
+    compute_valid_range,
+    annotate_store_group,
+)
+
 __version__ = "0.1.0"
 
 __all__ = [
@@ -81,4 +87,8 @@ __all__ = [
     "get_state_variables",
     "get_flux_variables",
     "get_temporal_type",
+    # Ignore value detection
+    "detect_ignore_value",
+    "compute_valid_range",
+    "annotate_store_group",
 ]

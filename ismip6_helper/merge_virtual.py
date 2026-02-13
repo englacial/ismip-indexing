@@ -126,6 +126,18 @@ def compute_union_time_axis(vdatasets: list, tolerance_days: float = 0.5) -> np.
     all_times = []
     for ds in vdatasets:
         if 'time' in ds.variables:
+            # Only include time from datasets where normalization succeeded.
+            # Un-normalized datasets (e.g. BISICLES lim/limnsw with garbage
+            # time values) still have their original encoding attrs, so their
+            # values are in unknown units and must not be mixed into the union.
+            time_attrs = ds['time'].attrs
+            if time_attrs.get('units') != STANDARD_TIME_UNITS or \
+               time_attrs.get('calendar') != STANDARD_TIME_CALENDAR:
+                logger.warning(
+                    "Skipping non-normalized time from union axis (units=%r, calendar=%r)",
+                    time_attrs.get('units'), time_attrs.get('calendar'),
+                )
+                continue
             all_times.append(ds['time'].values.ravel())
 
     if not all_times:
@@ -252,6 +264,114 @@ def _pad_manifest_to_union(
     return xr.Variable(dims=var.dims, data=new_marr, attrs=var.attrs, encoding=var.encoding)
 
 
+def _pad_manifest_chunks_to_union(
+    var: xr.Variable,
+    union_time: np.ndarray,
+    ds_time: np.ndarray,
+    tolerance: float = 0.5,
+) -> xr.Variable:
+    """
+    Pad a ManifestArray with multi-timestep chunks to match the union time axis.
+
+    Unlike _pad_manifest_to_union (which works per-timestep), this handles
+    variables where each time chunk covers multiple timesteps (e.g. BISICLES
+    with chunk_shape (18, 153, 153) and chunk_grid (5, 5, 5) covering 90 steps).
+
+    We can't split compressed multi-timestep chunks, but we CAN do chunk-level
+    padding: keep all existing time chunks and append empty chunks for new
+    time-chunk positions at the end of the union axis.
+
+    Parameters
+    ----------
+    var : xr.Variable
+        Variable backed by a ManifestArray with multi-timestep chunks.
+    union_time : np.ndarray
+        The target union time axis.
+    ds_time : np.ndarray
+        The dataset's original time values.
+    tolerance : float
+        Tolerance in days for matching time values.
+
+    Returns
+    -------
+    xr.Variable with padded ManifestArray.
+    """
+    import math
+
+    marr = var.data
+    old_shape = marr.shape
+    spatial_shape = old_shape[1:]
+    n_union = len(union_time)
+
+    chunk_shape = tuple(marr.metadata.chunk_grid.chunk_shape)
+    time_chunk_size = chunk_shape[0]
+
+    old_chunk_grid = marr.manifest.shape_chunk_grid
+    n_orig_time_chunks = old_chunk_grid[0]
+    spatial_chunk_grid = old_chunk_grid[1:]
+    n_spatial_chunks = int(np.prod(spatial_chunk_grid))
+
+    n_union_time_chunks = math.ceil(n_union / time_chunk_size)
+    new_chunk_grid_shape = (n_union_time_chunks,) + tuple(spatial_chunk_grid)
+
+    paths = np.empty(new_chunk_grid_shape, dtype=np.dtypes.StringDType())
+    paths[:] = ""
+    offsets = np.zeros(new_chunk_grid_shape, dtype=np.dtype("uint64"))
+    lengths = np.zeros(new_chunk_grid_shape, dtype=np.dtype("uint64"))
+
+    # Build lookup of original entries by chunk grid index
+    old_entries = list(marr.manifest.values())
+    old_entries_by_idx = {}
+    for idx, entry in zip(np.ndindex(tuple(old_chunk_grid)), old_entries):
+        old_entries_by_idx[idx] = entry
+
+    # For each new time-chunk position, check if the corresponding timestep
+    # range overlaps with the original dataset's time axis. If the first
+    # timestep of that chunk range matches an original chunk, copy all spatial
+    # entries for that time-chunk position.
+    for tc in range(n_union_time_chunks):
+        first_step = tc * time_chunk_size
+        if first_step >= n_union:
+            break
+
+        union_val = union_time[first_step]
+
+        # Find matching original time-chunk
+        matched_orig_tc = None
+        for orig_tc in range(n_orig_time_chunks):
+            orig_first_step = orig_tc * time_chunk_size
+            if orig_first_step < len(ds_time):
+                if abs(ds_time[orig_first_step] - union_val) <= tolerance:
+                    matched_orig_tc = orig_tc
+                    break
+
+        if matched_orig_tc is not None:
+            for spatial_idx in np.ndindex(tuple(spatial_chunk_grid)):
+                old_key = (matched_orig_tc,) + spatial_idx
+                entry = old_entries_by_idx.get(old_key)
+                if entry is not None:
+                    new_key = (tc,) + spatial_idx
+                    paths[new_key] = entry["path"]
+                    offsets[new_key] = entry["offset"]
+                    lengths[new_key] = entry["length"]
+
+    new_manifest = ChunkManifest.from_arrays(
+        paths=paths, offsets=offsets, lengths=lengths, validate_paths=False
+    )
+
+    new_shape = (n_union,) + spatial_shape
+    new_chunk_grid = RegularChunkGrid(chunk_shape=chunk_shape)
+    new_metadata = dataclasses.replace(
+        marr.metadata,
+        shape=new_shape,
+        fill_value=np.float64('nan'),
+        chunk_grid=new_chunk_grid,
+    )
+
+    new_marr = ManifestArray(metadata=new_metadata, chunkmanifest=new_manifest)
+    return xr.Variable(dims=var.dims, data=new_marr, attrs=var.attrs, encoding=var.encoding)
+
+
 def pad_dataset_to_union_time(
     vds: xr.Dataset,
     union_time: np.ndarray,
@@ -282,6 +402,29 @@ def pad_dataset_to_union_time(
     if 'time' not in vds.variables:
         return vds
 
+    # Skip time-dependent variables from datasets with un-normalized time.
+    # Their time values are in unknown units and can't be matched against
+    # the union axis. Writing them would produce arrays with empty manifests
+    # (all NaN) that pollute the store. Return only non-time-dependent
+    # variables so the downstream merge doesn't try to reindex them.
+    time_attrs = vds['time'].attrs
+    if time_attrs.get('units') != STANDARD_TIME_UNITS or \
+       time_attrs.get('calendar') != STANDARD_TIME_CALENDAR:
+        logger.warning(
+            "Skipping padding for dataset with non-normalized time (units=%r, calendar=%r)",
+            time_attrs.get('units'), time_attrs.get('calendar'),
+        )
+        # Keep only variables without a time dimension
+        keep_vars = {
+            name: var for name, var in vds.data_vars.items()
+            if 'time' not in var.dims
+        }
+        keep_coords = {
+            name: coord for name, coord in vds.coords.items()
+            if name != 'time' and 'time' not in coord.dims
+        }
+        return xr.Dataset(keep_vars, coords=keep_coords)
+
     ds_time = vds['time'].values.ravel()
     new_vars = {}
 
@@ -298,12 +441,22 @@ def pad_dataset_to_union_time(
 
         marr = var.data
 
-        # Check for per-timestep chunks
+        # Check for per-timestep chunks vs multi-timestep chunks
         if marr.manifest.shape_chunk_grid[0] != marr.shape[0]:
-            logger.warning(
-                "Variable %s has compressed time chunks (%s), skipping padding",
-                name, marr.manifest.shape_chunk_grid
-            )
+            import math
+            time_chunk_size = marr.metadata.chunk_grid.chunk_shape[0]
+            n_orig_chunks = math.ceil(marr.shape[0] / time_chunk_size)
+            n_union_chunks = math.ceil(len(union_time) / time_chunk_size)
+            if n_union_chunks >= n_orig_chunks:
+                # Union is a superset — can append empty chunks at the end
+                new_vars[name] = _pad_manifest_chunks_to_union(
+                    var, union_time, ds_time, tolerance_days
+                )
+            else:
+                logger.warning(
+                    "Variable %s: multi-timestep chunks and union is shorter, skipping",
+                    name,
+                )
             continue
 
         new_vars[name] = _pad_manifest_to_union(var, union_time, ds_time, tolerance_days)
@@ -376,6 +529,24 @@ def _collect_datasets(datasets: list) -> xr.Dataset:
                 if isinstance(coord.data, ManifestArray):
                     continue
                 all_coords[name] = coord
+
+    # Safety net: detect and drop variables whose time dimension doesn't
+    # match the time coordinate. This prevents xarray from trying to
+    # reindex ManifestArrays (which triggers "fancy indexing not supported")
+    # when datasets with mismatched time sizes are combined without padding
+    # (e.g. empty union fallback with BISICLES state=90 vs flux=91 steps).
+    if 'time' in all_coords:
+        n_time = all_coords['time'].shape[0]
+        to_drop = []
+        for name, var in all_vars.items():
+            if 'time' in var.dims and var.shape[var.dims.index('time')] != n_time:
+                logger.warning(
+                    "Dropping variable %s from collect: time dim %d != coord %d",
+                    name, var.shape[var.dims.index('time')], n_time,
+                )
+                to_drop.append(name)
+        for name in to_drop:
+            del all_vars[name]
 
     return xr.Dataset(all_vars, coords=all_coords)
 

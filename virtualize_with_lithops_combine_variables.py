@@ -207,6 +207,7 @@ def virtualize_and_combine_batch(urls: List[str], registry: ObjectStoreRegistry,
 
     # virtualize and append all needed metadata (for now just the variable)
     vdatasets = []
+    nc3_fallbacks = []
     for url in urls:
         # Try HDF5 (NetCDF4) first, fall back to NetCDF3. Some batches contain
         # a mix of formats (e.g. LSCE/GRISLI2/hist_std has both HDF5 and NetCDF3 files).
@@ -220,7 +221,10 @@ def virtualize_and_combine_batch(urls: List[str], registry: ObjectStoreRegistry,
                 loadable_variables=loadable_variables,
                 decode_times=False
             )
-        except Exception:
+        except Exception as hdf5_err:
+            logger.warning("HDF5 parse failed for %s: %s — falling back to NetCDF3 download",
+                           os.path.basename(url), hdf5_err)
+            nc3_fallbacks.append(os.path.basename(url))
             vds_var = _open_netcdf3_via_download(url, s3_store, registry, loadable_variables)
         # apply ismip specific fixer functions
         # fix_time_encoding cleans up malformed attributes (typos, missing calendar, etc.)
@@ -236,7 +240,7 @@ def virtualize_and_combine_batch(urls: List[str], registry: ObjectStoreRegistry,
     # Rechunk, pad to union time axis, and merge
     vds = ismip6_helper.merge_virtual_datasets(vdatasets)
 
-    return vds
+    return vds, nc3_fallbacks
 
 
 def batch_virt_func(batch: Tuple[Tuple[str], List[Dict[str, Union[str, int]]]]) -> Dict[str, Any]:
@@ -246,11 +250,12 @@ def batch_virt_func(batch: Tuple[Tuple[str], List[Dict[str, Union[str, int]]]]) 
         store = obstore.store.from_url(bucket, skip_signature=True)
         registry = ObjectStoreRegistry({bucket: store})
         bin_time = batch.get('bin_time', True)
-        vds = virtualize_and_combine_batch(batch['urls'], registry, bin_time=bin_time)
+        vds, nc3_fallbacks = virtualize_and_combine_batch(batch['urls'], registry, bin_time=bin_time)
         return {
                 'success': True,
                 'batch': batch,
-                'virtual_dataset': vds
+                'virtual_dataset': vds,
+                'nc3_fallbacks': nc3_fallbacks,
             }
 
     except Exception as e:
@@ -332,6 +337,7 @@ def batch_write_func(batch: Tuple[Tuple[str], List[Dict[str, Union[str, int]]]],
         if 'commit_id' in result_holder:
             if attempt > 0:
                 print(f"    {path}: succeeded on attempt {attempt + 1}")
+
             return {
                 'success': True,
                 'batch': batch,
@@ -494,6 +500,76 @@ def print_cost_summary(cost_stats: dict, s3_put_count: int = 0):
     print("--------------------")
 
 
+def annotate_all_groups(
+    local_storage: bool = False,
+    cloud_backend: str = "aws",
+    write_creds: str = None,
+    store_type: str = "combined",
+):
+    """Walk all groups in the store and annotate ignore_value attrs.
+
+    Designed to run as a separate pass after the write pipeline completes,
+    with fresh credentials. Skips variables that already have ignore_value set.
+    """
+    store_config = STORE_TYPE_CONFIG[store_type]
+    group_prefix = store_config["group_prefix"]
+
+    repo_kwargs = get_repo_kwargs(
+        local_storage=local_storage,
+        cloud_backend=cloud_backend,
+        write_creds=write_creds,
+    )
+    repo = icechunk.Repository.open_or_create(**repo_kwargs)
+    session = repo.readonly_session(branch="main")
+    root = zarr.open(session.store, mode="r")
+
+    # Discover all experiment groups: group_prefix/Model_Name/experiment
+    try:
+        top = root[group_prefix]
+    except KeyError:
+        print(f"No '{group_prefix}' group found in store, nothing to annotate.")
+        return
+
+    groups_to_annotate = []
+    for model_name in top.keys():
+        model_group = top[model_name]
+        if not isinstance(model_group, zarr.Group):
+            continue
+        for exp_name in model_group.keys():
+            groups_to_annotate.append(f"{group_prefix}/{model_name}/{exp_name}")
+
+    print(f"Annotating ignore_value for {len(groups_to_annotate)} groups in '{group_prefix}'...")
+    annotated_count = 0
+    skipped_count = 0
+    failed_count = 0
+
+    for i, group_path in enumerate(groups_to_annotate, 1):
+        try:
+            # Quick check via readonly session: single attr lookup on the group
+            try:
+                group = root[group_path]
+                if group.attrs.get('_annotation_complete'):
+                    skipped_count += 1
+                    print(f"  [{i}/{len(groups_to_annotate)}] [SKIP] {group_path}")
+                    continue
+            except Exception:
+                pass  # Fall through to full annotation
+
+            result = ismip6_helper.annotate_store_group(repo, group_path)
+            if result:
+                annotated_count += 1
+                print(f"  [{i}/{len(groups_to_annotate)}] [ANNOTATED] {group_path}")
+            else:
+                skipped_count += 1
+                print(f"  [{i}/{len(groups_to_annotate)}] [SKIP] {group_path}")
+        except Exception as e:
+            failed_count += 1
+            print(f"  [{i}/{len(groups_to_annotate)}] [FAIL] {group_path}: {e}")
+
+    print(f"\nAnnotation complete: {annotated_count} annotated, "
+          f"{skipped_count} already done/nothing to do, {failed_count} failed")
+
+
 def get_id_from_batch(batch):
     return f"{batch['institution_id']}_{batch['source_id']}/{batch['experiment_id']}"
 
@@ -646,6 +722,15 @@ def process_all_files(
     for r in failed_results:
         print(f"  FAIL: {get_id_from_batch(r['batch'])}: {r.get('error', '')[:200]}")
 
+    # Report NetCDF3 fallbacks (each one downloads the full file — major perf hit)
+    total_nc3 = sum(len(r.get('nc3_fallbacks', [])) for r in successful_results)
+    if total_nc3 > 0:
+        print(f"\nNetCDF3 fallbacks: {total_nc3} files across batches (each downloads full file to Lambda):")
+        for r in successful_results:
+            fb = r.get('nc3_fallbacks', [])
+            if fb:
+                print(f"  {get_id_from_batch(r['batch'])}: {len(fb)} files — {', '.join(fb)}")
+
     # Step 4: Write virtual datasets to icechunk
     # Group by model prefix (e.g. "AWI_PISM1") so experiments within the same
     # model are written sequentially, avoiding icechunk rebase conflicts on
@@ -794,6 +879,11 @@ if __name__ == "__main__":
              "'combined' (all variables, year-binned), 'state' (ST variables only), or "
              "'flux' (FL variables only). Default: all."
     )
+    parser.add_argument(
+        "--annotate-only", action="store_true",
+        help="Skip the write pipeline and only run ignore_value annotation on existing groups. "
+             "Use this after the main pipeline completes, with fresh credentials."
+    )
     args = parser.parse_args()
 
     # Infer backend from config, or default based on config filename
@@ -804,17 +894,30 @@ if __name__ == "__main__":
         cloud_backend = infer_cloud_backend(args.config)
         local_execution = args.local_execution
 
+    if args.store_type == "all":
+        store_types = ["combined", "state", "flux"]
+    else:
+        store_types = [args.store_type]
+
+    # --annotate-only: skip the write pipeline, just annotate existing groups
+    if args.annotate_only:
+        for st in store_types:
+            print(f"\n{'='*60}\nAnnotating store type: {st}\n{'='*60}")
+            annotate_all_groups(
+                local_storage=args.local_storage,
+                cloud_backend=cloud_backend,
+                write_creds=args.write_creds,
+                store_type=st,
+            )
+        import sys
+        sys.exit(0)
+
     # Default: concurrent writes on AWS, sequential on GCP (due to rate limits)
     concurrent_writes = not args.sequential_writes
     if cloud_backend == "gcp" and not args.sequential_writes:
         print("Note: GCP backend detected. Using sequential writes by default "
               "(GCS rate-limits ref file mutations). Pass --sequential-writes=false to override.")
         concurrent_writes = False
-
-    if args.store_type == "all":
-        store_types = ["combined", "state", "flux"]
-    else:
-        store_types = [args.store_type]
 
     if len(store_types) > 1:
         # Run each store type in a separate subprocess to ensure full cleanup

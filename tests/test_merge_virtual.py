@@ -17,9 +17,15 @@ from ismip6_helper.merge_virtual import (
     compute_union_time_axis,
     merge_virtual_datasets,
     pad_dataset_to_union_time,
+    _collect_datasets,
     _pad_manifest_to_union,
+    _pad_manifest_chunks_to_union,
 )
-from ismip6_helper.time_utils import STANDARD_TIME_UNITS, STANDARD_TIME_CALENDAR
+from ismip6_helper.time_utils import (
+    STANDARD_TIME_UNITS,
+    STANDARD_TIME_CALENDAR,
+    normalize_time_encoding,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +171,65 @@ def _make_dataset(var_name, time_values, ny=3, nx=3, per_timestep=True):
         dims=("time",),
         data=np.array(time_values, dtype=np.float64),
         attrs={"units": STANDARD_TIME_UNITS, "calendar": STANDARD_TIME_CALENDAR},
+    )
+    return xr.Dataset(
+        {var_name: var},
+        coords={"time": time_coord},
+    )
+
+
+def _make_manifest_1d(n_time):
+    """Create a 1D ManifestArray variable with only a time dimension (e.g. scalar field)."""
+    itemsize = 8  # float64
+    chunk_grid_shape = (n_time,)
+
+    paths = np.empty(chunk_grid_shape, dtype=np.dtypes.StringDType())
+    offsets = np.empty(chunk_grid_shape, dtype=np.dtype("uint64"))
+    lengths = np.empty(chunk_grid_shape, dtype=np.dtype("uint64"))
+
+    for t in range(n_time):
+        paths[t] = "s3://bucket/data.nc"
+        offsets[t] = 1000 + t * itemsize
+        lengths[t] = itemsize
+
+    manifest = ChunkManifest.from_arrays(
+        paths=paths, offsets=offsets, lengths=lengths, validate_paths=False
+    )
+
+    metadata = create_v3_array_metadata(
+        shape=(n_time,),
+        data_type=np.dtype("float64"),
+        chunk_shape=(1,),
+    )
+
+    marr = ManifestArray(metadata=metadata, chunkmanifest=manifest)
+    return xr.Variable(dims=("time",), data=marr)
+
+
+def _make_dataset_unnormalized(var_name, time_values, ny=3, nx=3, per_timestep=True,
+                                units="days since 1995-01-01", calendar="365_day"):
+    """Build a dataset with non-standard time encoding (simulating failed normalization)."""
+    n_time = len(time_values)
+    var = _make_manifest_var(n_time, ny, nx, per_timestep=per_timestep)
+    time_coord = xr.Variable(
+        dims=("time",),
+        data=np.array(time_values, dtype=np.float64),
+        attrs={"units": units, "calendar": calendar},
+    )
+    return xr.Dataset(
+        {var_name: var},
+        coords={"time": time_coord},
+    )
+
+
+def _make_dataset_no_time_attrs(var_name, time_values, ny=3, nx=3, per_timestep=True):
+    """Build a dataset with no time encoding attrs (simulating BISICLES missing units)."""
+    n_time = len(time_values)
+    var = _make_manifest_var(n_time, ny, nx, per_timestep=per_timestep)
+    time_coord = xr.Variable(
+        dims=("time",),
+        data=np.array(time_values, dtype=np.float64),
+        attrs={},  # no units, no calendar
     )
     return xr.Dataset(
         {var_name: var},
@@ -377,19 +442,32 @@ class TestPadDatasetToUnionTime:
         # hfgeoubed should still be 2D
         assert padded["hfgeoubed"].dims == ("y", "x")
 
-    def test_compressed_dropped_with_warning(self, caplog):
-        """Variables with non-per-timestep chunks are dropped when time mismatches."""
+    def test_compressed_padded_when_union_longer(self):
+        """Compressed vars are chunk-level padded when union is a superset."""
         times = [_days_since_2000(y) for y in [2015, 2016, 2017]]
         ds = _make_dataset("compressed_var", times, per_timestep=False)
 
         union_time = np.array([_days_since_2000(y) for y in [2015, 2016, 2017, 2018]])
+        padded = pad_dataset_to_union_time(ds, union_time)
+
+        # Variable is now chunk-level padded (not dropped)
+        assert "compressed_var" in padded.data_vars
+        assert padded["compressed_var"].shape[0] == 4
+
+    def test_compressed_dropped_when_union_needs_fewer_chunks(self, caplog):
+        """Compressed vars are dropped when union requires fewer time chunks."""
+        # Variable with multi-timestep chunks: 90 steps, chunk_time=18 → 5 time chunks
+        times = [_days_since_2000(y) for y in range(2015, 2105)]
+        ds = _make_dataset_multi_time_chunks("compressed_var", times, time_chunk_size=18)
+
+        # Union has only 17 steps → ceil(17/18)=1 chunk < 5 original chunks
+        union_time = np.array([_days_since_2000(y) for y in range(2015, 2032)])
 
         with caplog.at_level(logging.WARNING, logger="ismip6_helper.merge_virtual"):
             padded = pad_dataset_to_union_time(ds, union_time)
 
-        # Variable can't be padded and has mismatched time dim, so it's dropped
         assert "compressed_var" not in padded.data_vars
-        assert "compressed time chunks" in caplog.text
+        assert "union is shorter" in caplog.text
 
     def test_compressed_kept_when_time_matches(self):
         """Compressed variables are kept if their time dim matches the union."""
@@ -516,6 +594,261 @@ class TestMergeVirtualDatasets:
 
 
 # ---------------------------------------------------------------------------
+# Helpers for multi-timestep chunk tests
+# ---------------------------------------------------------------------------
+
+def _make_manifest_var_multi_time_chunks(
+    n_time, time_chunk_size=18, ny=9, nx=9, chunk_ny=3, chunk_nx=3,
+):
+    """Create a ManifestArray with multi-timestep AND multi-spatial chunks.
+
+    Simulates BISICLES-style files with chunk_shape (18, 153, 153) and
+    chunk_grid (5, 5, 5) covering 90 timesteps.
+
+    Returns an xr.Variable backed by a ManifestArray with shape (n_time, ny, nx)
+    and chunk_shape (time_chunk_size, chunk_ny, chunk_nx).
+    """
+    import math
+
+    n_chunks_t = math.ceil(n_time / time_chunk_size)
+    n_chunks_y = math.ceil(ny / chunk_ny)
+    n_chunks_x = math.ceil(nx / chunk_nx)
+    chunk_grid_shape = (n_chunks_t, n_chunks_y, n_chunks_x)
+
+    paths = np.empty(chunk_grid_shape, dtype=np.dtypes.StringDType())
+    offsets = np.empty(chunk_grid_shape, dtype=np.dtype("uint64"))
+    lengths = np.empty(chunk_grid_shape, dtype=np.dtype("uint64"))
+
+    cursor = 1000
+    for tc in range(n_chunks_t):
+        for cy in range(n_chunks_y):
+            for cx in range(n_chunks_x):
+                paths[tc, cy, cx] = "s3://bucket/data.nc"
+                offsets[tc, cy, cx] = cursor
+                chunk_bytes = time_chunk_size * chunk_ny * chunk_nx * 8 // 2
+                lengths[tc, cy, cx] = chunk_bytes
+                cursor += chunk_bytes
+
+    manifest = ChunkManifest.from_arrays(
+        paths=paths, offsets=offsets, lengths=lengths, validate_paths=False
+    )
+
+    metadata = create_v3_array_metadata(
+        shape=(n_time, ny, nx),
+        data_type=np.dtype("float64"),
+        chunk_shape=(time_chunk_size, chunk_ny, chunk_nx),
+    )
+
+    marr = ManifestArray(metadata=metadata, chunkmanifest=manifest)
+    return xr.Variable(dims=("time", "y", "x"), data=marr)
+
+
+def _make_dataset_multi_time_chunks(var_name, time_values, **kwargs):
+    """Build a virtual dataset with a multi-timestep-chunk ManifestArray."""
+    n_time = len(time_values)
+    var = _make_manifest_var_multi_time_chunks(n_time, **kwargs)
+    time_coord = xr.Variable(
+        dims=("time",),
+        data=np.array(time_values, dtype=np.float64),
+        attrs={"units": STANDARD_TIME_UNITS, "calendar": STANDARD_TIME_CALENDAR},
+    )
+    return xr.Dataset({var_name: var}, coords={"time": time_coord})
+
+
+# ---------------------------------------------------------------------------
+# Tests: garbage time value filtering
+# ---------------------------------------------------------------------------
+
+class TestGarbageTimeValues:
+    def test_unnormalized_excluded_from_union(self):
+        """Datasets with non-standard time encoding are excluded from the union."""
+        clean = [_days_since_2000(y) for y in range(2015, 2106)]  # 91 steps
+        # After normalize_time_encoding fails, garbage-time datasets keep their
+        # original (non-standard) encoding attrs. These should be excluded entirely
+        # — not filtered by value magnitude.
+        garbage = [np.nan, 1e219, -1e200, 5e100, np.inf]
+
+        ds_clean = _make_dataset("lithk", clean)
+        ds_garbage = _make_dataset_unnormalized("lim", garbage)
+
+        union = compute_union_time_axis([ds_clean, ds_garbage])
+        assert len(union) == 91
+        assert np.all(np.isfinite(union))
+
+    def test_subnormal_garbage_excluded_by_metadata(self):
+        """Subnormal floats (≈0.0) from uninitialized memory are excluded via metadata check.
+
+        This is the specific failure mode from BISICLES: 2.31e-310 passes any
+        value-magnitude filter but should be excluded because the dataset's time
+        encoding is non-standard (normalization failed).
+        """
+        clean = [_days_since_2000(y) for y in range(2015, 2106)]  # 91 steps
+        # Subnormal values that would pass a |v| <= 100,000 filter
+        subnormal_garbage = [2.31e-310, 5e-311, 0.0, 1e-300, 3e-320]
+
+        ds_clean = _make_dataset("lithk", clean)
+        ds_garbage = _make_dataset_unnormalized("lim", subnormal_garbage)
+
+        union = compute_union_time_axis([ds_clean, ds_garbage])
+        # The near-zero garbage must NOT appear in the union
+        assert len(union) == 91
+        # No values near zero (smallest valid ISMIP6 value is ~-55000 for year 1850)
+        assert np.all(union > 1000)
+
+    def test_bisicles_state_scenario(self):
+        """BISICLES state-only: 20 vars, 2 with garbage time → clean union."""
+        state_times = [_days_since_2000(y) for y in range(2015, 2105)]  # 90 steps
+
+        datasets = []
+        # 18 clean state variables (normalized encoding)
+        for i in range(18):
+            datasets.append(_make_dataset(f"var_{i}", state_times))
+
+        # 2 garbage-time variables with non-standard encoding (normalization failed)
+        garbage_times = [1e219] * 5 + [np.nan] * 5
+        for name in ["lim", "limnsw"]:
+            ds = _make_dataset_unnormalized(name, garbage_times)
+            datasets.append(ds)
+
+        union = compute_union_time_axis(datasets)
+        assert len(union) == 90
+
+        np.testing.assert_allclose(
+            union,
+            np.array(state_times),
+            atol=0.5,
+        )
+
+    def test_padding_skipped_for_unnormalized_time(self):
+        """pad_dataset_to_union_time strips time-dependent vars from non-normalized datasets."""
+        garbage = [2.31e-310, 1.71e+219, 0.0, np.nan, 5e100]
+        ds = _make_dataset_unnormalized("lim", garbage)
+
+        union_time = np.array([_days_since_2000(y) for y in range(2015, 2106)])
+        result = pad_dataset_to_union_time(ds, union_time)
+
+        # Time-dependent variables should be stripped (not padded with empty manifests)
+        assert "lim" not in result.data_vars
+        assert "time" not in result.coords
+
+
+# ---------------------------------------------------------------------------
+# Tests: multi-timestep chunk padding
+# ---------------------------------------------------------------------------
+
+class TestMultiTimestepChunkPadding:
+    def test_pad_append_one_chunk(self):
+        """90→91 with chunk_time=18 produces 6 time chunks (ceil(91/18)=6)."""
+        import math
+
+        ds_time = np.array([_days_since_2000(y) for y in range(2015, 2105)])  # 90
+        union_time = np.array([_days_since_2000(y) for y in range(2015, 2106)])  # 91
+
+        var = _make_manifest_var_multi_time_chunks(90, time_chunk_size=18, ny=9, nx=9, chunk_ny=3, chunk_nx=3)
+        padded = _pad_manifest_chunks_to_union(var, union_time, ds_time)
+        marr = padded.data
+
+        assert marr.shape == (91, 9, 9)
+        assert marr.manifest.shape_chunk_grid[0] == math.ceil(91 / 18)  # 6
+
+    def test_existing_chunks_preserved(self):
+        """Original chunk entries should be at their correct positions."""
+        ds_time = np.array([_days_since_2000(y) for y in range(2015, 2105)])  # 90
+        union_time = np.array([_days_since_2000(y) for y in range(2015, 2106)])  # 91
+
+        var = _make_manifest_var_multi_time_chunks(90, time_chunk_size=18, ny=9, nx=9, chunk_ny=3, chunk_nx=3)
+
+        orig_entries = list(var.data.manifest.values())
+        padded = _pad_manifest_chunks_to_union(var, union_time, ds_time)
+        padded_entries = list(padded.data.manifest.values())
+
+        # Original had 5 time chunks × 3 × 3 spatial = 45 entries
+        assert len(orig_entries) == 45
+
+        # First 45 entries in padded should match original (same time-chunk positions)
+        for i in range(45):
+            assert padded_entries[i]["offset"] == orig_entries[i]["offset"], \
+                f"Entry {i}: expected offset {orig_entries[i]['offset']}, got {padded_entries[i]['offset']}"
+            assert padded_entries[i]["path"] == orig_entries[i]["path"]
+
+    def test_chunk_shape_preserved(self):
+        """Chunk shape (18, 3, 3) should be unchanged after padding."""
+        ds_time = np.array([_days_since_2000(y) for y in range(2015, 2105)])  # 90
+        union_time = np.array([_days_since_2000(y) for y in range(2015, 2106)])  # 91
+
+        var = _make_manifest_var_multi_time_chunks(90, time_chunk_size=18, ny=9, nx=9, chunk_ny=3, chunk_nx=3)
+        padded = _pad_manifest_chunks_to_union(var, union_time, ds_time)
+
+        assert tuple(padded.data.metadata.chunk_grid.chunk_shape) == (18, 3, 3)
+
+    def test_bisicles_combined_scenario(self):
+        """End-to-end: state=90, flux=91 → all data vars survive merge."""
+        state_times = [_days_since_2000(y) for y in range(2015, 2105)]  # 90
+        flux_times = [_days_since_2000(y) for y in range(2015, 2106)]   # 91
+
+        # State vars: multi-timestep chunks (90 steps, chunk_time=18)
+        ds_state = _make_dataset_multi_time_chunks(
+            "lithk", state_times, time_chunk_size=18, ny=9, nx=9, chunk_ny=3, chunk_nx=3,
+        )
+
+        # Flux vars: per-timestep chunks (91 steps) — must match spatial dims
+        ds_flux = _make_dataset("acabf", flux_times, ny=9, nx=9)
+
+        merged = merge_virtual_datasets([ds_state, ds_flux])
+
+        assert "lithk" in merged
+        assert "acabf" in merged
+        # Both padded to 91 (union)
+        assert merged["lithk"].shape[0] == 91
+        assert merged["acabf"].shape[0] == 91
+        # lithk chunk shape preserved
+        assert tuple(merged["lithk"].data.metadata.chunk_grid.chunk_shape) == (18, 3, 3)
+
+    def test_bisicles_with_garbage_lim_scenario(self):
+        """End-to-end BISICLES: normal vars + garbage-time lim/limnsw.
+
+        This reproduces the actual failure: lim/limnsw have garbage time values
+        from uninitialized memory (including subnormals ≈ 0.0 that pass any
+        magnitude filter). After normalize_time_encoding fails, their attrs are
+        non-standard. The fix: exclude them from the union by checking encoding
+        metadata, not value magnitude.
+        """
+        state_times = [_days_since_2000(y) for y in range(2015, 2105)]  # 90
+        flux_times = [_days_since_2000(y) for y in range(2015, 2106)]   # 91
+
+        # Normal state var with multi-timestep chunks
+        ds_state = _make_dataset_multi_time_chunks(
+            "lithk", state_times, time_chunk_size=18, ny=9, nx=9, chunk_ny=3, chunk_nx=3,
+        )
+
+        # Normal flux var with per-timestep chunks
+        ds_flux = _make_dataset("acabf", flux_times, ny=9, nx=9)
+
+        # Garbage-time lim/limnsw: subnormal values that would pass magnitude filters,
+        # but have non-standard encoding attrs (normalization failed)
+        garbage_times = [2.31e-310, 1.71e+219, 0.0, np.nan, 5e-300]
+        ds_lim = _make_dataset_unnormalized("lim", garbage_times, ny=9, nx=9)
+        ds_limnsw = _make_dataset_unnormalized("limnsw", garbage_times, ny=9, nx=9)
+
+        merged = merge_virtual_datasets([ds_state, ds_flux, ds_lim, ds_limnsw])
+
+        # Normal variables should be present and correctly padded
+        assert "lithk" in merged
+        assert "acabf" in merged
+        assert merged["lithk"].shape[0] == 91
+        assert merged["acabf"].shape[0] == 91
+
+        # lithk chunks should have real data (not all-empty manifests)
+        lithk_entries = list(merged["lithk"].data.manifest.values())
+        real_entries = [e for e in lithk_entries if e["path"] != ""]
+        assert len(real_entries) > 0, "lithk should have real chunk manifests"
+
+        # Garbage variables should be excluded (lim/limnsw have mismatched time dim)
+        assert "lim" not in merged.data_vars
+        assert "limnsw" not in merged.data_vars
+
+
+# ---------------------------------------------------------------------------
 # Tests: skip list loading and filtering
 # ---------------------------------------------------------------------------
 
@@ -565,3 +898,211 @@ class TestSkipList:
 
         result = load_skip_list(str(tmp_path / "nonexistent.txt"))
         assert len(result) == 0
+
+
+# ---------------------------------------------------------------------------
+# Tests: _collect_datasets safety net for mismatched time dims
+# ---------------------------------------------------------------------------
+
+class TestCollectDatasetsMismatchedTime:
+    def test_mismatched_time_drops_variable(self, caplog):
+        """Variables with time dim != time coord are dropped instead of crashing."""
+        # ds1: 90 timesteps
+        times_90 = [_days_since_2000(y) for y in range(2015, 2105)]
+        ds1 = _make_dataset("lithk", times_90)
+
+        # ds2: 91 timesteps (different time dim size)
+        times_91 = [_days_since_2000(y) for y in range(2015, 2106)]
+        ds2 = _make_dataset("acabf", times_91)
+
+        # Collect without padding — the time coord from ds1 (90) is taken first,
+        # so acabf (91) should be dropped
+        with caplog.at_level(logging.WARNING, logger="ismip6_helper.merge_virtual"):
+            result = _collect_datasets([ds1, ds2])
+
+        assert "lithk" in result.data_vars
+        assert "acabf" not in result.data_vars
+        assert "Dropping variable acabf" in caplog.text
+
+    def test_matching_time_kept(self):
+        """Variables with matching time dims are kept."""
+        times = [_days_since_2000(y) for y in range(2015, 2105)]
+        ds1 = _make_dataset("lithk", times)
+        ds2 = _make_dataset("acabf", times)
+
+        result = _collect_datasets([ds1, ds2])
+        assert "lithk" in result.data_vars
+        assert "acabf" in result.data_vars
+
+    def test_no_time_coord_no_crash(self):
+        """Datasets without time coord don't trigger the safety net."""
+        ds1 = xr.Dataset({"hfgeoubed": _make_manifest_2d()})
+        ds2 = xr.Dataset({"topg": _make_manifest_2d()})
+
+        result = _collect_datasets([ds1, ds2])
+        assert "hfgeoubed" in result.data_vars
+        assert "topg" in result.data_vars
+
+
+# ---------------------------------------------------------------------------
+# Tests: 1D ManifestArray variable padding
+# ---------------------------------------------------------------------------
+
+class TestManifest1DPadding:
+    def test_1d_manifest_pad(self):
+        """1D ManifestArray (time-only) should be padded correctly."""
+        ds_time = np.array([_days_since_2000(y) for y in [2015, 2016, 2017]])
+        var = _make_manifest_1d(3)
+        union_time = np.array([_days_since_2000(y) for y in [2015, 2016, 2017, 2018]])
+
+        padded = _pad_manifest_to_union(var, union_time, ds_time)
+        assert padded.data.shape == (4,)
+
+        entries = list(padded.data.manifest.values())
+        real_entries = [e for e in entries if e["path"] != ""]
+        assert len(real_entries) == 3
+
+    def test_1d_in_dataset_merge(self):
+        """1D ManifestArray survives full merge pipeline."""
+        times_3 = [_days_since_2000(y) for y in [2015, 2016, 2017]]
+        times_4 = [_days_since_2000(y) for y in [2015, 2016, 2017, 2018]]
+
+        # 3D variable with 4 timesteps
+        ds_3d = _make_dataset("lithk", times_4)
+
+        # 1D variable with 3 timesteps
+        var_1d = _make_manifest_1d(3)
+        time_coord = xr.Variable(
+            dims=("time",),
+            data=np.array(times_3, dtype=np.float64),
+            attrs={"units": STANDARD_TIME_UNITS, "calendar": STANDARD_TIME_CALENDAR},
+        )
+        ds_1d = xr.Dataset({"scalar_field": var_1d}, coords={"time": time_coord})
+
+        merged = merge_virtual_datasets([ds_3d, ds_1d])
+        assert "lithk" in merged
+        assert "scalar_field" in merged
+        assert merged["scalar_field"].shape == (4,)
+
+
+# ---------------------------------------------------------------------------
+# Tests: empty union with mismatched dims (BISICLES all-non-normalized)
+# ---------------------------------------------------------------------------
+
+class TestEmptyUnionMismatchedDims:
+    def test_empty_union_drops_mismatched(self, caplog):
+        """All datasets non-normalized → empty union → graceful handling."""
+        # Simulate BISICLES where ALL vars fail normalization:
+        # state vars have 90 steps, flux vars have 91 steps
+        times_90 = list(range(0, 90 * 365, 365))  # raw day offsets
+        times_91 = list(range(0, 91 * 365, 365))
+
+        ds_state = _make_dataset_unnormalized("lithk", times_90)
+        ds_flux = _make_dataset_unnormalized("acabf", times_91)
+
+        with caplog.at_level(logging.WARNING, logger="ismip6_helper.merge_virtual"):
+            result = merge_virtual_datasets([ds_state, ds_flux])
+
+        # Should not crash — mismatched vars are dropped by _collect_datasets safety net
+        # The first dataset's time coord (90) is taken, acabf (91) is dropped
+        assert "lithk" in result.data_vars
+        assert "acabf" not in result.data_vars
+
+    def test_empty_union_same_dims_kept(self):
+        """All non-normalized but same time dim → all kept (no mismatch to drop)."""
+        times_90 = list(range(0, 90 * 365, 365))
+
+        ds1 = _make_dataset_unnormalized("lithk", times_90)
+        ds2 = _make_dataset_unnormalized("acabf", times_90)
+
+        result = merge_virtual_datasets([ds1, ds2])
+        assert "lithk" in result.data_vars
+        assert "acabf" in result.data_vars
+
+
+# ---------------------------------------------------------------------------
+# Tests: normalize_time_encoding epoch detection for missing units
+# ---------------------------------------------------------------------------
+
+class TestNormalizeTimeEpochDetection:
+    def test_bisicles_no_time_attrs_detected(self):
+        """BISICLES-style dataset with no time attrs gets epoch detected."""
+        import cftime
+
+        # Simulate BISICLES: day offsets from 2015-01-01, no units attr
+        raw_times = np.array([i * 365.0 for i in range(90)], dtype=np.float64)
+        time_var = xr.Variable(dims=("time",), data=raw_times, attrs={})
+        ds = xr.Dataset(coords={"time": time_var})
+
+        result = normalize_time_encoding(ds)
+
+        # Should have standard encoding after detection
+        assert result['time'].attrs.get('units') == STANDARD_TIME_UNITS
+        assert result['time'].attrs.get('calendar') == STANDARD_TIME_CALENDAR
+
+        # Verify dates are in the expected range
+        dates = cftime.num2date(
+            result['time'].values,
+            units=STANDARD_TIME_UNITS,
+            calendar=STANDARD_TIME_CALENDAR,
+        )
+        years = [d.year for d in np.asarray(dates).flat]
+        assert all(2015 <= y <= 2104 for y in years)
+
+    def test_no_units_non_finite_skipped(self):
+        """Non-finite values with no units → skip (not crash)."""
+        raw_times = np.array([np.nan, np.inf, 365.0], dtype=np.float64)
+        time_var = xr.Variable(dims=("time",), data=raw_times, attrs={})
+        ds = xr.Dataset(coords={"time": time_var})
+
+        result = normalize_time_encoding(ds)
+        # Should return unchanged
+        assert result['time'].attrs.get('units') is None
+
+    def test_no_units_extreme_values_skipped(self):
+        """Extreme day-offset values with no units → skip."""
+        raw_times = np.array([1e10, 2e10], dtype=np.float64)
+        time_var = xr.Variable(dims=("time",), data=raw_times, attrs={})
+        ds = xr.Dataset(coords={"time": time_var})
+
+        result = normalize_time_encoding(ds)
+        assert result['time'].attrs.get('units') is None
+
+    def test_no_units_no_epoch_match_skipped(self):
+        """Day offsets that don't match any epoch → skip."""
+        # Very large offsets that would put dates outside 1850-2200 for all candidates
+        raw_times = np.array([500000.0, 600000.0], dtype=np.float64)
+        time_var = xr.Variable(dims=("time",), data=raw_times, attrs={})
+        ds = xr.Dataset(coords={"time": time_var})
+
+        result = normalize_time_encoding(ds)
+        assert result['time'].attrs.get('units') is None
+
+    def test_bisicles_end_to_end(self):
+        """Full BISICLES scenario: mixed state/flux with missing attrs, epoch detection normalizes them."""
+        import cftime
+
+        # State vars: 90 day-offset steps from 2015
+        state_times = np.array([i * 365.0 for i in range(90)], dtype=np.float64)
+        # Flux vars: 91 day-offset steps from 2015
+        flux_times = np.array([i * 365.0 for i in range(91)], dtype=np.float64)
+
+        # Build datasets with no time attrs
+        ds_state = _make_dataset_no_time_attrs("lithk", state_times)
+        ds_flux = _make_dataset_no_time_attrs("acabf", flux_times)
+
+        # Normalize both
+        ds_state_norm = normalize_time_encoding(ds_state)
+        ds_flux_norm = normalize_time_encoding(ds_flux)
+
+        # Both should now have standard encoding
+        assert ds_state_norm['time'].attrs['units'] == STANDARD_TIME_UNITS
+        assert ds_flux_norm['time'].attrs['units'] == STANDARD_TIME_UNITS
+
+        # Merge should now work (both are normalized, padding handles the 90 vs 91 mismatch)
+        merged = merge_virtual_datasets([ds_state_norm, ds_flux_norm])
+        assert "lithk" in merged
+        assert "acabf" in merged
+        # Union of 90 and 91 = 91
+        assert merged["lithk"].shape[0] == 91
+        assert merged["acabf"].shape[0] == 91
