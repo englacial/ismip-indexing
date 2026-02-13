@@ -543,17 +543,36 @@ def annotate_all_groups(
     skipped_count = 0
     failed_count = 0
 
-    for group_path in groups_to_annotate:
+    for i, group_path in enumerate(groups_to_annotate, 1):
         try:
+            # Quick check: skip groups where all variables already have ignore_value
+            try:
+                group = root[group_path]
+                needs_work = False
+                for var_name in group.keys():
+                    if var_name.lower() in ("time", "x", "y", "lat", "lon"):
+                        continue
+                    arr = group[var_name]
+                    if arr.ndim >= 2 and 'ignore_value' not in arr.attrs:
+                        needs_work = True
+                        break
+                if not needs_work:
+                    skipped_count += 1
+                    print(f"  [{i}/{len(groups_to_annotate)}] [SKIP] {group_path}")
+                    continue
+            except Exception:
+                pass  # Fall through to full annotation
+
             result = ismip6_helper.annotate_store_group(repo, group_path)
             if result:
                 annotated_count += 1
-                print(f"  [ANNOTATED] {group_path}")
+                print(f"  [{i}/{len(groups_to_annotate)}] [ANNOTATED] {group_path}")
             else:
                 skipped_count += 1
+                print(f"  [{i}/{len(groups_to_annotate)}] [SKIP] {group_path}")
         except Exception as e:
             failed_count += 1
-            print(f"  [FAIL] {group_path}: {e}")
+            print(f"  [{i}/{len(groups_to_annotate)}] [FAIL] {group_path}: {e}")
 
     print(f"\nAnnotation complete: {annotated_count} annotated, "
           f"{skipped_count} already done/nothing to do, {failed_count} failed")
