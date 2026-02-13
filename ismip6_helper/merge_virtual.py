@@ -126,25 +126,24 @@ def compute_union_time_axis(vdatasets: list, tolerance_days: float = 0.5) -> np.
     all_times = []
     for ds in vdatasets:
         if 'time' in ds.variables:
+            # Only include time from datasets where normalization succeeded.
+            # Un-normalized datasets (e.g. BISICLES lim/limnsw with garbage
+            # time values) still have their original encoding attrs, so their
+            # values are in unknown units and must not be mixed into the union.
+            time_attrs = ds['time'].attrs
+            if time_attrs.get('units') != STANDARD_TIME_UNITS or \
+               time_attrs.get('calendar') != STANDARD_TIME_CALENDAR:
+                logger.warning(
+                    "Skipping non-normalized time from union axis (units=%r, calendar=%r)",
+                    time_attrs.get('units'), time_attrs.get('calendar'),
+                )
+                continue
             all_times.append(ds['time'].values.ravel())
 
     if not all_times:
         return np.array([], dtype=np.float64)
 
     combined = np.concatenate(all_times)
-
-    # Filter implausible values that leak through from variables with garbage
-    # time data (e.g. BISICLES lim/limnsw with uninitialized memory).
-    # ±100,000 days from epoch 2000-01-01 covers ~274 years in each direction.
-    PLAUSIBLE_RANGE = 100_000
-    mask = np.isfinite(combined) & (np.abs(combined) <= PLAUSIBLE_RANGE)
-    if not np.all(mask):
-        logger.warning(
-            "Dropping %d implausible time values from union axis",
-            int(np.sum(~mask)),
-        )
-        combined = combined[mask]
-
     combined = np.sort(combined)
 
     # Deduplicate within tolerance
@@ -402,6 +401,29 @@ def pad_dataset_to_union_time(
     """
     if 'time' not in vds.variables:
         return vds
+
+    # Skip time-dependent variables from datasets with un-normalized time.
+    # Their time values are in unknown units and can't be matched against
+    # the union axis. Writing them would produce arrays with empty manifests
+    # (all NaN) that pollute the store. Return only non-time-dependent
+    # variables so the downstream merge doesn't try to reindex them.
+    time_attrs = vds['time'].attrs
+    if time_attrs.get('units') != STANDARD_TIME_UNITS or \
+       time_attrs.get('calendar') != STANDARD_TIME_CALENDAR:
+        logger.warning(
+            "Skipping padding for dataset with non-normalized time (units=%r, calendar=%r)",
+            time_attrs.get('units'), time_attrs.get('calendar'),
+        )
+        # Keep only variables without a time dimension
+        keep_vars = {
+            name: var for name, var in vds.data_vars.items()
+            if 'time' not in var.dims
+        }
+        keep_coords = {
+            name: coord for name, coord in vds.coords.items()
+            if name != 'time' and 'time' not in coord.dims
+        }
+        return xr.Dataset(keep_vars, coords=keep_coords)
 
     ds_time = vds['time'].values.ravel()
     new_vars = {}

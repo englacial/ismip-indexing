@@ -181,6 +181,11 @@ def annotate_store_group(repo, group_path: str) -> bool:
         if arr.ndim < 2:
             continue
 
+        # Skip variables that already have ignore_value annotated
+        if 'ignore_value' in arr.attrs:
+            logger.debug("[ignore_value] %s/%s: already annotated, skipping", group_path, var_name)
+            continue
+
         # Read corner pixels only (small slice, resolves through virtual chunks)
         try:
             if arr.ndim == 3:
