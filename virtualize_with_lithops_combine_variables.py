@@ -545,18 +545,10 @@ def annotate_all_groups(
 
     for i, group_path in enumerate(groups_to_annotate, 1):
         try:
-            # Quick check: skip groups where all variables already have ignore_value
+            # Quick check via readonly session: single attr lookup on the group
             try:
                 group = root[group_path]
-                needs_work = False
-                for var_name in group.keys():
-                    if var_name.lower() in ("time", "x", "y", "lat", "lon"):
-                        continue
-                    arr = group[var_name]
-                    if arr.ndim >= 2 and 'ignore_value' not in arr.attrs:
-                        needs_work = True
-                        break
-                if not needs_work:
+                if group.attrs.get('_annotation_complete'):
                     skipped_count += 1
                     print(f"  [{i}/{len(groups_to_annotate)}] [SKIP] {group_path}")
                     continue

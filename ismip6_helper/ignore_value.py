@@ -165,6 +165,11 @@ def annotate_store_group(repo, group_path: str) -> bool:
         logger.warning("[ignore_value] Group %s not found in store", group_path)
         return False
 
+    # Fast path: if this group was already fully processed, skip entirely
+    if group.attrs.get('_annotation_complete'):
+        logger.debug("[ignore_value] %s: already complete, skipping", group_path)
+        return False
+
     annotated = []
 
     for var_name in list(group.keys()):
@@ -181,9 +186,9 @@ def annotate_store_group(repo, group_path: str) -> bool:
         if arr.ndim < 2:
             continue
 
-        # Skip variables that already have ignore_value annotated
-        if 'ignore_value' in arr.attrs:
-            logger.debug("[ignore_value] %s/%s: already annotated, skipping", group_path, var_name)
+        # Skip variables that already have both ignore_value and valid range
+        if 'ignore_value' in arr.attrs and 'valid_min' in arr.attrs:
+            logger.debug("[ignore_value] %s/%s: already annotated with range, skipping", group_path, var_name)
             continue
 
         # Read corner pixels only (small slice, resolves through virtual chunks)
@@ -256,7 +261,19 @@ def annotate_store_group(repo, group_path: str) -> bool:
 
         annotated.append(var_name)
 
+    # Mark the group as fully processed so future runs skip it entirely
+    group.attrs['_annotation_complete'] = True
+
     if not annotated:
+        # No sentinels found, but mark complete so we don't re-scan
+        try:
+            session.commit(
+                f"Mark {group_path} annotation complete (no sentinels)",
+                rebase_with=icechunk.BasicConflictSolver(),
+                rebase_tries=5,
+            )
+        except Exception as e:
+            logger.warning("[ignore_value] Failed to commit completion marker for %s: %s", group_path, e)
         return False
 
     try:
