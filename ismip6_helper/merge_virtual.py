@@ -530,6 +530,24 @@ def _collect_datasets(datasets: list) -> xr.Dataset:
                     continue
                 all_coords[name] = coord
 
+    # Safety net: detect and drop variables whose time dimension doesn't
+    # match the time coordinate. This prevents xarray from trying to
+    # reindex ManifestArrays (which triggers "fancy indexing not supported")
+    # when datasets with mismatched time sizes are combined without padding
+    # (e.g. empty union fallback with BISICLES state=90 vs flux=91 steps).
+    if 'time' in all_coords:
+        n_time = all_coords['time'].shape[0]
+        to_drop = []
+        for name, var in all_vars.items():
+            if 'time' in var.dims and var.shape[var.dims.index('time')] != n_time:
+                logger.warning(
+                    "Dropping variable %s from collect: time dim %d != coord %d",
+                    name, var.shape[var.dims.index('time')], n_time,
+                )
+                to_drop.append(name)
+        for name in to_drop:
+            del all_vars[name]
+
     return xr.Dataset(all_vars, coords=all_coords)
 
 
