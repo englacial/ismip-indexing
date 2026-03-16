@@ -1,5 +1,9 @@
 FROM public.ecr.aws/lambda/python:3.12
 
+# uv may be present as a build tool; Lambda's filesystem is read-only
+# except /tmp, so point the uv cache there to avoid init failures.
+ENV UV_CACHE_DIR=/tmp/.cache/uv
+
 # Install system dependencies needed by native packages
 RUN dnf install -y gcc gcc-c++ make && dnf clean all
 
