@@ -637,7 +637,7 @@ def process_all_files(
 
     try:
         root = zarr.open(session.store, mode='r')
-        print('Found groups in the store. Skipping all existing groups.')
+        print('Found groups in the store. Checking for missing variables...')
         print(root.tree(level=1))
         batches_raw = []
         for name, group in grouped:
@@ -646,7 +646,16 @@ def process_all_files(
                 print(f'{path} does not exist')
                 batches_raw.append((name, group.to_dict('records')))
             else:
-                print(f'{path} exists. Skipping')
+                # Check for missing variables within the existing group
+                existing_vars = set(root[path].keys())
+                batch_vars = set(group['variable'].unique())
+                missing_vars = batch_vars - existing_vars
+                if missing_vars:
+                    missing_files = group[group['variable'].isin(missing_vars)]
+                    print(f'{path} exists but missing variables: {missing_vars}')
+                    batches_raw.append((name, missing_files.to_dict('records')))
+                else:
+                    print(f'{path} exists (all variables present). Skipping')
     except zarr.errors.GroupNotFoundError:
         # Store is empty, process all groups
         print("  Icechunk store is empty, processing all groups...")
