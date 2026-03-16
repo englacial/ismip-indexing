@@ -270,8 +270,34 @@ def _single_write_attempt(repo, vds, path, commit_msg):
     """Execute a single write+commit attempt. Runs in a disposable thread so
     that a Rust-level deadlock (poisoned connection pool) can be detected via
     timeout rather than hanging the caller forever."""
+    from virtualizarr.writers.icechunk import (
+        validate_virtual_chunk_containers,
+        write_virtual_dataset_to_icechunk_group,
+    )
+    from zarr import Group as ZarrGroup
+    from zarr.storage import StorePath
+
     session = repo.writable_session("main")
-    vds.vz.to_icechunk(session.store, group=path)
+    store = session.store
+    store_path = StorePath(store, path=path or "")
+
+    validate_virtual_chunk_containers(session.config, [vds])
+
+    # Use Group.open() to allow writing new variables into existing groups;
+    # fall back to Group.from_store() when the group doesn't exist yet.
+    try:
+        group_object = ZarrGroup.open(store=store_path, zarr_format=3)
+    except (FileNotFoundError, KeyError):
+        group_object = ZarrGroup.from_store(store=store_path, zarr_format=3)
+
+    write_virtual_dataset_to_icechunk_group(
+        vds=vds,
+        store=store,
+        group=group_object,
+        append_dim=None,
+        last_updated_at=None,
+    )
+
     commit_id = session.commit(
         commit_msg,
         rebase_with=icechunk.BasicConflictSolver(),
