@@ -355,7 +355,9 @@ def _revirtualize_full_group(batch: dict) -> xr.Dataset:
     logger.info("Re-virtualizing full group %s (%d files) for rewrite",
                 path, len(all_urls))
 
-    store = obstore.store.from_url(SOURCE_BUCKET, skip_signature=True)
+    # Explicit region required: this runs locally (not on Lambda), so obstore
+    # can't auto-detect the region and defaults to us-east-1.
+    store = obstore.store.from_url(SOURCE_BUCKET, skip_signature=True, region="us-west-2")
     registry = ObjectStoreRegistry({SOURCE_BUCKET: store})
 
     vds, nc3_fallbacks = virtualize_and_combine_batch(all_urls, registry, bin_time=bin_time)
