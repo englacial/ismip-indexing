@@ -311,11 +311,69 @@ def _single_write_attempt(repo, vds, path, commit_msg):
 WRITE_ATTEMPT_TIMEOUT_S = 120
 
 
+def _delete_group(repo, path: str):
+    """Delete an existing group from the store and commit the deletion.
+
+    Used before a full-group rewrite so the new write starts with a clean
+    group (no stale time coordinate with mismatched dimensions).
+    """
+    session = repo.writable_session("main")
+    store = session.store
+    root = zarr.open(store, mode="a")
+    try:
+        del root[path]
+    except KeyError:
+        pass  # Already gone
+    if session.has_uncommitted_changes:
+        session.commit(
+            f"Delete {path} for full-group rewrite",
+            rebase_with=icechunk.BasicConflictSolver(),
+            rebase_tries=5,
+        )
+    logger.info("Deleted group %s for rewrite", path)
+
+
+def _is_time_mismatch_error(err_str: str) -> bool:
+    """Check if an error is due to incompatible time axes in an existing group."""
+    return (
+        "already exists with different dimension sizes" in err_str
+        or "Failed to decode variable 'time'" in err_str
+    )
+
+
+def _revirtualize_full_group(batch: dict) -> xr.Dataset:
+    """Re-virtualize all files for a group locally (not via Lithops).
+
+    Used as a fallback when appending new variables to an existing group
+    fails due to incompatible time axes. Returns a merged virtual dataset
+    containing all variables.
+    """
+    all_urls = batch['all_urls']
+    bin_time = batch.get('bin_time', True)
+    path = batch['path']
+
+    logger.info("Re-virtualizing full group %s (%d files) for rewrite",
+                path, len(all_urls))
+
+    store = obstore.store.from_url(SOURCE_BUCKET, skip_signature=True)
+    registry = ObjectStoreRegistry({SOURCE_BUCKET: store})
+
+    vds, nc3_fallbacks = virtualize_and_combine_batch(all_urls, registry, bin_time=bin_time)
+    if nc3_fallbacks:
+        logger.info("Full-group rewrite %s: %d NetCDF3 fallbacks", path, len(nc3_fallbacks))
+
+    return vds
+
+
 def batch_write_func(batch: Tuple[Tuple[str], List[Dict[str, Union[str, int]]]], vds: xr.Dataset, repo: icechunk.Repository, local_storage: bool = False, max_retries: int = 50) -> Dict[str, Any]:
     """Wrap writing to icechunk in error handling. Retries with fresh sessions on stale parent errors.
 
     Each attempt runs in a separate thread with a timeout to detect Rust-level
     deadlocks caused by connection pool poisoning (icechunk issue #1586).
+
+    If the write fails due to incompatible time axes and the batch includes
+    'all_urls' (full file list), falls back to re-virtualizing all files
+    locally and overwriting the entire group.
     """
     import time as _time
     import random as _random
@@ -376,6 +434,33 @@ def batch_write_func(batch: Tuple[Tuple[str], List[Dict[str, Union[str, int]]]],
         e = error_holder.get('error')
         last_error = e
         err_str = str(e)
+
+        # Time axis mismatch: fall back to full-group rewrite if we have all_urls
+        if _is_time_mismatch_error(err_str) and 'all_urls' in batch:
+            print(f"    {path}: time axis mismatch, falling back to full-group rewrite")
+            try:
+                vds = _revirtualize_full_group(batch)
+                commit_msg = f"Rewrote {path} (full group with updated variables)"
+                # Delete the existing group so the rewrite starts clean
+                _delete_group(repo, path)
+                # Remove all_urls so subsequent retries don't re-trigger fallback
+                del batch['all_urls']
+                last_error = None
+                continue
+            except Exception as rewrite_err:
+                return {
+                    "success": False,
+                    "batch": batch,
+                    "error": f"Full-group rewrite failed: {rewrite_err}",
+                }
+        elif _is_time_mismatch_error(err_str):
+            # No all_urls available (shouldn't happen for partial updates)
+            return {
+                "success": False,
+                "batch": batch,
+                "error": err_str,
+            }
+
         retryable = (
             "expected parent" in err_str
             or "Rebase failed" in err_str
@@ -679,7 +764,11 @@ def process_all_files(
                 if missing_vars:
                     missing_files = group[group['variable'].isin(missing_vars)]
                     print(f'{path} exists but missing variables: {missing_vars}')
-                    batches_raw.append((name, missing_files.to_dict('records')))
+                    # Store both missing-only and full file lists; the full list
+                    # is used as a fallback if the fast-path write fails due to
+                    # incompatible time axes.
+                    batches_raw.append((name, missing_files.to_dict('records'),
+                                        group.to_dict('records')))
                 else:
                     print(f'{path} exists (all variables present). Skipping')
     except zarr.errors.GroupNotFoundError:
@@ -695,8 +784,14 @@ def process_all_files(
     batches = []
     total_skipped_files = 0
     for batch_raw in batches_raw:
+        # batch_raw is a 2-tuple (new group) or 3-tuple (partial update with fallback)
+        if len(batch_raw) == 3:
+            (name, batch_files, all_batch_files) = batch_raw
+        else:
+            (name, batch_files) = batch_raw
+            all_batch_files = None
         # parse batch input
-        ((institution_id, source_id, experiment_id), batch_files) = batch_raw
+        (institution_id, source_id, experiment_id) = name
         # Transform GCS URLs to source.coop S3 URLs
         urls = [bf['url'].replace('gs://ismip6', SOURCE_BUCKET) for bf in batch_files]
         # Filter against skip list
@@ -708,14 +803,20 @@ def process_all_files(
             logger.info("Batch %s_%s/%s: all files skipped", institution_id, source_id, experiment_id)
             continue
         path = f"{group_prefix}/{institution_id}_{source_id}/{experiment_id}"
-        batches.append({
+        batch = {
             'path': path,
             'experiment_id': experiment_id,
             'institution_id': institution_id,
             'source_id': source_id,
             'urls': urls,
             'bin_time': store_config['bin_time'],
-        })
+        }
+        # Include full file list for fallback rewrite when appending to existing groups
+        if all_batch_files is not None:
+            all_urls = [bf['url'].replace('gs://ismip6', SOURCE_BUCKET) for bf in all_batch_files]
+            all_urls, _ = filter_urls_by_skip_list(all_urls, skip_list)
+            batch['all_urls'] = all_urls
+        batches.append(batch)
 
     if total_skipped_files:
         print(f"  Skipped {total_skipped_files} files from skip list")
