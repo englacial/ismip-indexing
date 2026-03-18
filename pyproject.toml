@@ -11,7 +11,7 @@ requires-python = "==3.12.*"
 authors = [
     { name = "Thomas Teisberg" },
 ]
-keywords = ["ismip6", "ice-sheet", "climate", "xarray", "panel"]
+keywords = ["ismip6", "ice-sheet", "climate", "xarray", "icechunk", "virtualizarr"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
@@ -27,18 +27,12 @@ dependencies = [
     "fsspec>=2025.9.0",
     "gcsfs>=2025.9.0",
     "h5netcdf>=1.7.3",
-    "holoviews>=1.19.0",
-    "hvplot>=0.10.0",
     "icechunk>=1.1.13",
-    "ipywidgets>=8.1.0",
-    "jupyter>=1.1.0",
-    "jupyter-bokeh>=4.0.5",
     "matplotlib>=3.10.7",
     "netcdf4>=1.7.0",
     "numpy>=2.3.4",
     "obstore>=0.8.2",
     "pandas>=2.3.3",
-    "panel>=1.5.4",
     "pyarrow>=22.0.0",
     "pyproj>=3.7.0",
     "pyyaml>=6.0.0",
@@ -64,4 +58,4 @@ markers = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["ismip6_helper", "ismip6_comparison_app"]
+packages = ["ismip6_helper"]
