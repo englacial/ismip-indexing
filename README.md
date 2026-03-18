@@ -1,60 +1,105 @@
-# ISMIP6 Model Outputs Indexing and Comparison Tool
+# ISMIP6 Data Indexing and Ingest Pipeline
 
-TL;DR: Start here: [models.englacial.org](https://models.englacial.org)
+TL;DR: Browse the data at [englacial.org/static/models/](https://englacial.org/static/models/), or read more at [englacial.org/models.html](https://englacial.org/models.html).
 
-## Users
+## Overview
 
-This repository contains two different tools for understanding and visualizing model outputs from the [ISMIP6](https://www.ismip.org/) model comparison project. We're not associated with ISMIP. This are viewer tools for publicly-available data outputs that we hope are intersting and useful to the scientific community.
+This repository contains tools for indexing, ingesting, and serving [ISMIP6](https://www.ismip.org/) Antarctic ice sheet model outputs. We are not associated with ISMIP. These are tools for publicly-available data that we hope are interesting and useful to the scientific community.
 
-### ISMIP6 outputs indexing
+There are three main components:
 
-There is a GitHub workflow in `.github/workflows/deploy-pages.yml` that builds a static site indexing what IMSIP6 outputs are available.
+1. **Ingest pipeline** -- Virtualizes NetCDF source files into an [Icechunk](https://icechunk.io/) store using [VirtualiZarr](https://github.com/zarr-developers/VirtualiZarr) and [Lithops](https://lithops-cloud.github.io/) serverless functions on AWS Lambda.
+2. **Python library** (`ismip6_helper`) -- Handles file indexing, grid correction, time encoding normalization, and ignore-value detection.
+3. **Static indexing site** -- Catalogs available outputs at [docs.englacial.org/ismip-indexing/](https://docs.englacial.org/ismip-indexing/).
 
-You can find this site here: [https://docs.englacial.org/ismip-indexing/](https://docs.englacial.org/ismip-indexing/)
+The interactive web viewer lives in a separate repository: [englacial/ismip-viewer](https://github.com/englacial/ismip-viewer).
 
-Note that data files marked "not available" could exist but simply have some formatting issue that prevented us from automatically loading them. We've tried to automatically correct some basic formatting issues, but we may have missed some things. Feel free to [open an issue](https://github.com/englacial/ismip-indexing/issues/new).
+## Data
 
-In order to make this work, we've hosted a copy of the ISMIP6 outputs (which are [available through Globus](https://theghub.org/accessing-data-with-globus)) on our own Google Cloud Storage bucket. It's located at `gs://ismip6`. This is entirely unofficial, but you're welcome to use it if it helps. No authentication is required. For guidance on citations, please refer to the [ISMIP wiki](https://theghub.org/groups/ismip6/wiki/PublicationsCitationGuidance).
+### Source files
 
-### Interactive ISMIP6 Antarctica outputs comparison tool
+A copy of the ISMIP6 outputs (originally [available through Globus](https://theghub.org/accessing-data-with-globus)) is hosted on source.coop:
 
-This repository also contains a prototype web-based comparison tool for visualizing ISMIP6 Antarctica outputs.
-
-You can find this tool at [models.englacial.org](https://models.englacial.org).
-
-## Developers
-
-If you want to run a local copy, you can setup the tool like this:
-
-```bash
-# Install dependencies
-uv sync
-
-# Launch web app
-uv run panel serve ismip6_comparison_app/app.py --show --static-dirs static_content=./ismip6_comparison_app/static_content
+```
+s3://us-west-2.opendata.source.coop/englacial/ismip6/
 ```
 
-Visit `http://localhost:5006/app` to explore the data interactively.
+Public, anonymous read access. No authentication required. For citation guidance, see the [ISMIP wiki](https://theghub.org/groups/ismip6/wiki/PublicationsCitationGuidance).
 
-### Python API
+### Icechunk store
 
-The core of both tools is a simple Python library for reading and managing ISMIP6 outputs. This library is repsonsible for creating an index of data files and correcting minor formatting errors in the datasets, such as incorrect location information and typos in file names.
+The ingest pipeline writes a virtualized Icechunk store to:
 
-```python
-from ismip6_index import get_file_index
-
-# Get file index (cached)
-df = get_file_index()
-
-# Force rebuild
-df = get_file_index(force_rebuild=True)
+```
+s3://us-west-2.opendata.source.coop/englacial/ismip6/icechunk-ais/
 ```
 
-### Data Overview
+This store contains virtual references to chunks in the source NetCDF files -- no data is duplicated. It is organized into three top-level groups:
+
+- **`combined/`** -- All variables merged per model+experiment, with time binned to annual resolution
+- **`state/`** -- State variables only (e.g. `lithk`, `orog`, `base`), native time resolution
+- **`flux/`** -- Flux variables only (e.g. `acabf`, `dlithkdt`), native time resolution
+
+See [ICECHUNK_STORE.md](ICECHUNK_STORE.md) for details on the store structure and how the pipeline works.
+
+### Data overview
 
 - **10,034 files** (~1.1 TB total)
 - **17 models** from 14 institutions
 - **94 experiments**
 - **37 variables**
 - All Antarctic ice sheet (AIS) data
-- Public access via `gs://ismip6` (no authentication required)
+
+## Developers
+
+### Setup
+
+```bash
+# Install dependencies
+uv sync
+
+# Run tests
+uv run pytest tests/ -v -m "not integration"
+```
+
+### Running the ingest pipeline
+
+The pipeline virtualizes source NetCDF files and writes them to the Icechunk store using Lithops on AWS Lambda:
+
+```bash
+# Build all three store types (combined, state, flux)
+python virtualize_with_lithops_combine_variables.py \
+    --config lithops_aws.yaml \
+    --write-creds sc_creds.json
+
+# Or build a specific store type
+python virtualize_with_lithops_combine_variables.py \
+    --config lithops_aws.yaml \
+    --write-creds sc_creds.json \
+    --store-type flux
+```
+
+See `python virtualize_with_lithops_combine_variables.py --help` for all options, and [lithops_aws.md](lithops_aws.md) for AWS infrastructure setup.
+
+### Python API
+
+The `ismip6_helper` library provides utilities for working with ISMIP6 data:
+
+```python
+from ismip6_helper import get_file_index
+
+# Get file index (cached locally)
+df = get_file_index()
+
+# Force rebuild from source bucket
+df = get_file_index(force_rebuild=True)
+```
+
+Key modules:
+
+- `index` -- File indexing and path parsing
+- `grid_utils` -- Grid coordinate correction
+- `time_utils` -- Time encoding normalization
+- `merge_virtual` -- Union time axis computation and manifest padding
+- `variable_classification` -- State/flux variable classification
+- `ignore_value` -- Sentinel value detection and annotation
