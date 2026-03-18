@@ -161,5 +161,3 @@ The Lambda runtime must be built and deployed before running:
 lithops runtime build ismip6-icechunk -f Dockerfile.lithops --config lithops_aws.yaml
 lithops runtime deploy ismip6-icechunk --config lithops_aws.yaml
 ```
-
-Note: the `-f Dockerfile.lithops` flag is required -- without it, Docker uses the default `Dockerfile` (which is for the Panel comparison app, not Lambda).
