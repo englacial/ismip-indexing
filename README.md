@@ -14,6 +14,9 @@ There are three main components:
 
 The interactive web viewer lives in a separate repository: [englacial/ismip-viewer](https://github.com/englacial/ismip-viewer).
 
+For **using** the ISMIP6 outputs from the virtualized store, see our [example
+notebooks](./notebooks/).
+
 ## Data
 
 ### Source files
@@ -78,6 +81,9 @@ python virtualize_with_lithops_combine_variables.py \
     --write-creds sc_creds.json \
     --store-type flux
 ```
+
+Note: the `sc_creds.json` input file is copied from source.coop as the temporary
+credentials for write access.
 
 See `python virtualize_with_lithops_combine_variables.py --help` for all options, and [lithops_aws.md](lithops_aws.md) for AWS infrastructure setup.
 
