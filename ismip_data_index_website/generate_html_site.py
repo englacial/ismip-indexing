@@ -34,7 +34,7 @@ def gs_to_https(gs_url: str) -> str:
 
 def load_variable_metadata() -> Dict:
     """Load variable metadata from ismip_metadata/variables.yaml."""
-    yaml_path = Path(__file__).parent / 'ismip_metadata' / 'variables.yaml'
+    yaml_path = Path(__file__).parent.parent / 'ismip_metadata' / 'variables.yaml'
     if yaml_path.exists():
         with open(yaml_path, 'r') as f:
             return yaml.safe_load(f)
