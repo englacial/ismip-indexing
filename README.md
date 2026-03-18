@@ -2,6 +2,9 @@
 
 TL;DR: Browse the data at [englacial.org/static/models/](https://englacial.org/static/models/), or read more at [englacial.org/models.html](https://englacial.org/models.html).
 
+For **using** the ISMIP6 outputs from the virtualized store, see our [example
+notebooks](./notebooks/).
+
 ## Overview
 
 This repository contains tools for indexing, ingesting, and serving [ISMIP6](https://www.ismip.org/) Antarctic ice sheet model outputs. We are not associated with ISMIP. These are tools for publicly-available data that we hope are interesting and useful to the scientific community.
@@ -13,9 +16,6 @@ There are three main components:
 3. **Static indexing site** -- Catalogs available outputs at [docs.englacial.org/ismip-indexing/](https://docs.englacial.org/ismip-indexing/).
 
 The interactive web viewer lives in a separate repository: [englacial/ismip-viewer](https://github.com/englacial/ismip-viewer).
-
-For **using** the ISMIP6 outputs from the virtualized store, see our [example
-notebooks](./notebooks/).
 
 ## Data
 
