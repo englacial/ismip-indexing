@@ -20,7 +20,7 @@ def virtualize_file(row: dict):
         dict with 'path', 'dataset', and 'url' keys
     """
     parser = HDFParser()
-    bucket = "gs://ismip6"
+    bucket = ismip6_helper.SOURCE_DATA_URL
     store = obstore.store.from_url(bucket, skip_signature=True)
     registry = ObjectStoreRegistry({bucket: store})
 
@@ -49,14 +49,14 @@ def open_or_create_repo() -> icechunk.Repository:
     config = icechunk.RepositoryConfig.default()
     config.set_virtual_chunk_container(
         icechunk.VirtualChunkContainer(
-            "gs://ismip6/",
-            store=icechunk.gcs_store()
+            ismip6_helper.SOURCE_DATA_URL + "/",
+            store=icechunk.s3_store(region="us-west-2"),
         )
     )
 
     # Use None for anonymous/public access to source data
     credentials = icechunk.containers_credentials({
-        "gs://ismip6/": None
+        ismip6_helper.SOURCE_DATA_URL + "/": None
     })
 
     icechunk_storage = icechunk.gcs_storage(bucket="ismip6-icechunk", prefix="12-07-2025", from_env=True)

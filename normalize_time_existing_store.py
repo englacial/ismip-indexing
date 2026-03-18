@@ -54,12 +54,12 @@ def get_repo(store_key: str):
     config = icechunk.RepositoryConfig.default()
     config.set_virtual_chunk_container(
         icechunk.VirtualChunkContainer(
-            "gs://ismip6/",
-            store=icechunk.gcs_store(),
+            ismip6_helper.SOURCE_DATA_URL + "/",
+            store=icechunk.s3_store(region="us-west-2"),
         )
     )
     config.max_concurrent_requests = 3
-    credentials = icechunk.containers_credentials({"gs://ismip6/": None})
+    credentials = icechunk.containers_credentials({ismip6_helper.SOURCE_DATA_URL + "/": None})
 
     repo = icechunk.Repository.open(
         storage, config=config, authorize_virtual_chunk_access=credentials

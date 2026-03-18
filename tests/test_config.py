@@ -248,7 +248,7 @@ class TestFilterLogic:
 
 class TestParseVariable:
     def test_standard_url(self):
-        url = "gs://ismip6/output/AIS/AWI/PISM1/exp05/acabf_AIS_AWI_PISM1_exp05.nc"
+        url = "s3://us-west-2.opendata.source.coop/englacial/ismip6/output/AIS/AWI/PISM1/exp05/acabf_AIS_AWI_PISM1_exp05.nc"
         assert virt._parse_variable_from_url(url) == "acabf"
 
     def test_multi_underscore(self):

@@ -5,7 +5,7 @@ A utility package for working with ISMIP6 (Ice Sheet Model Intercomparison Proje
 
 This package provides:
 - Grid utilities for correcting ISMIP6 grid coordinates
-- File indexing and caching for ISMIP6 datasets on Google Cloud Storage
+- File indexing and caching for ISMIP6 datasets
 - Time encoding fixes for CF-compliance
 
 Main modules:
@@ -13,6 +13,9 @@ Main modules:
 - index: Functions for indexing and caching ISMIP6 file metadata
 - time_utils: Functions for fixing time encoding issues in ISMIP6 files
 """
+
+# Source data location (public, anonymous read)
+SOURCE_DATA_URL = "s3://us-west-2.opendata.source.coop/englacial/ismip6"
 
 from .grid_utils import (
     correct_grid_coordinates,
@@ -61,6 +64,8 @@ from .ignore_value import (
 __version__ = "0.1.0"
 
 __all__ = [
+    # Source data location
+    "SOURCE_DATA_URL",
     # Grid utils
     "correct_grid_coordinates",
     "detect_grid_resolution",

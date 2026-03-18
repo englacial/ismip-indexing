@@ -57,12 +57,12 @@ def get_repo(store_key: str):
     config = icechunk.RepositoryConfig.default()
     config.set_virtual_chunk_container(
         icechunk.VirtualChunkContainer(
-            "gs://ismip6/",
-            store=icechunk.gcs_store(),
+            ismip6_helper.SOURCE_DATA_URL + "/",
+            store=icechunk.s3_store(region="us-west-2"),
         )
     )
     config.max_concurrent_requests = 3
-    credentials = icechunk.containers_credentials({"gs://ismip6/": None})
+    credentials = icechunk.containers_credentials({ismip6_helper.SOURCE_DATA_URL + "/": None})
 
     repo = icechunk.Repository.open(
         storage, config=config, authorize_virtual_chunk_access=credentials
@@ -72,7 +72,7 @@ def get_repo(store_key: str):
 
 
 def get_source_urls(model_name: str):
-    """Build a mapping of (experiment, variable) -> source GCS URL from the file index."""
+    """Build a mapping of (experiment, variable) -> source URL from the file index."""
     files_df = ismip6_helper.build_file_index()
     parts = model_name.split("_", 1)
     institution, model = parts[0], parts[1]
@@ -88,9 +88,9 @@ def get_source_urls(model_name: str):
     return url_map, model_files["experiment"].unique().tolist()
 
 
-def get_hdf5_offset(gcs_url: str, variable: str) -> int:
+def get_hdf5_offset(source_url: str, variable: str) -> int:
     """Read just the HDF5 header to get the byte offset of a dataset."""
-    https_url = gcs_url.replace("gs://ismip6/", "https://storage.googleapis.com/ismip6/")
+    https_url = source_url.replace("s3://", "https://")
     with _https_fs.open(https_url, "rb") as f:
         h5 = h5py.File(f, "r")
         ds = h5[variable]

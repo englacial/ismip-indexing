@@ -23,13 +23,18 @@ THRESHOLDS = {
 }
 
 
-def gs_to_https(gs_url: str) -> str:
-    """Convert gs:// URL to public HTTPS URL."""
-    if gs_url.startswith('gs://'):
-        # Remove gs:// prefix and convert to https://storage.googleapis.com/
-        path = gs_url[5:]  # Remove 'gs://'
-        return f'https://storage.googleapis.com/{path}'
-    return gs_url
+def storage_url_to_https(url: str) -> str:
+    """Convert s3:// or gs:// URL to a public HTTPS download URL."""
+    if url.startswith('s3://us-west-2.opendata.source.coop/'):
+        # source.coop requires downloads via data.source.coop
+        # s3://us-west-2.opendata.source.coop/englacial/ismip6/... → https://data.source.coop/englacial/ismip6/...
+        key = url[len('s3://us-west-2.opendata.source.coop/'):]
+        return f'https://data.source.coop/{key}'
+    if url.startswith('s3://'):
+        return 'https://' + url[5:]
+    if url.startswith('gs://'):
+        return 'https://storage.googleapis.com/' + url[5:]
+    return url
 
 
 def load_variable_metadata() -> Dict:
@@ -230,8 +235,9 @@ def get_html_header(title: str, breadcrumb: str = '') -> str:
 <body>
     <div class="container">
         <div class="nav">
-            <a href="index.html">Coverage Index</a>
-            <a href="viewer/index.html">Interactive Viewer</a>
+            <a href="https://docs.englacial.org/ismip-indexing/">Coverage Index</a>
+            <a href="https://englacial.org/static/models/">Interactive Viewer</a>
+            <a href="https://github.com/englacial/ismip-indexing">GitHub</a>
         </div>
         {breadcrumb}
         <h1>{title}</h1>
@@ -426,7 +432,7 @@ def generate_model_pages(df: pd.DataFrame, output_dir: Path, all_experiments: li
         url_lookup = {}
         for _, row in model_df.iterrows():
             key = (row['experiment'], row['variable'])
-            url_lookup[key] = gs_to_https(row['url'])
+            url_lookup[key] = storage_url_to_https(row['url'])
 
         # Create pivot table: experiments vs variables (binary presence)
         pivot = model_df.groupby(['experiment', 'variable']).size().reset_index(name='count')
@@ -536,7 +542,7 @@ def generate_experiment_pages(df: pd.DataFrame, output_dir: Path, all_models: li
         url_lookup = {}
         for _, row in exp_df.iterrows():
             key = (row['model'], row['variable'])
-            url_lookup[key] = gs_to_https(row['url'])
+            url_lookup[key] = storage_url_to_https(row['url'])
 
         # Create pivot table: models vs variables (binary presence)
         pivot = exp_df.groupby(['model', 'variable']).size().reset_index(name='count')
@@ -643,7 +649,7 @@ def generate_variable_pages(df: pd.DataFrame, output_dir: Path, all_models: list
         url_lookup = {}
         for _, row in var_df.iterrows():
             key = (row['model'], row['experiment'])
-            url_lookup[key] = gs_to_https(row['url'])
+            url_lookup[key] = storage_url_to_https(row['url'])
 
         # Create pivot table: models vs experiments (binary presence)
         pivot = var_df.groupby(['model', 'experiment']).size().reset_index(name='count')

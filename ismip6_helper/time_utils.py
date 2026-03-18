@@ -417,7 +417,7 @@ def open_ismip6_dataset(
     >>> import ismip6_helper
     >>>
     >>> ds = ismip6_helper.open_ismip6_dataset(
-    ...     'gs://ismip6/path/to/file.nc',
+    ...     's3://us-west-2.opendata.source.coop/englacial/ismip6/path/to/file.nc',
     ...     chunks={'time': 1}
     ... )
     """

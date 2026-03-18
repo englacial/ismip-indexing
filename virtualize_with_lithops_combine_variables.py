@@ -36,7 +36,7 @@ LAMBDA_COST_PER_GB_SECOND = 0.0000166667
 S3_PUT_COST_PER_REQUEST = 0.000005
 
 # Source data bucket (public, anonymous read)
-SOURCE_BUCKET = "s3://us-west-2.opendata.source.coop/englacial/ismip6"
+SOURCE_BUCKET = ismip6_helper.SOURCE_DATA_URL
 
 # Unified store prefix: all store types live under a single icechunk repo
 UNIFIED_STORE_PREFIX = "englacial/ismip6/icechunk-ais"
@@ -794,8 +794,7 @@ def process_all_files(
             all_batch_files = None
         # parse batch input
         (institution_id, source_id, experiment_id) = name
-        # Transform GCS URLs to source.coop S3 URLs
-        urls = [bf['url'].replace('gs://ismip6', SOURCE_BUCKET) for bf in batch_files]
+        urls = [bf['url'] for bf in batch_files]
         # Filter against skip list
         urls, skipped = filter_urls_by_skip_list(urls, skip_list)
         for s in skipped:
@@ -815,7 +814,7 @@ def process_all_files(
         }
         # Include full file list for fallback rewrite when appending to existing groups
         if all_batch_files is not None:
-            all_urls = [bf['url'].replace('gs://ismip6', SOURCE_BUCKET) for bf in all_batch_files]
+            all_urls = [bf['url'] for bf in all_batch_files]
             all_urls, _ = filter_urls_by_skip_list(all_urls, skip_list)
             batch['all_urls'] = all_urls
         batches.append(batch)
