@@ -31,3 +31,4 @@ gha-creds-*.json
 
 # local testing
 test-output/*
+.ipynb_checkpoints/
