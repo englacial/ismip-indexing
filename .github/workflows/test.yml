@@ -53,7 +53,7 @@ jobs:
           # Delete existing runtime to force fresh build (ignore error if not exists)
           uv run lithops runtime delete ismip6-icechunk -c virtualize_ismip6/lithops_aws.yaml || true
           # Build and deploy fresh runtime with latest ismip6_helper
-          uv run lithops runtime build -f virtualize_ismip6/Dockerfile.lithops ismip6-icechunk -c virtualize_ismip6/lithops_aws.yaml
+          uv run lithops runtime build -f Dockerfile.lithops ismip6-icechunk -c virtualize_ismip6/lithops_aws.yaml
           uv run lithops runtime deploy ismip6-icechunk -c virtualize_ismip6/lithops_aws.yaml
 
       - run: uv run python -m pytest virtualize_ismip6/tests/test_integration.py -v -s -W ignore::SyntaxWarning -m integration

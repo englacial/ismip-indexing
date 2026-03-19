@@ -8,7 +8,7 @@ ENV UV_CACHE_DIR=/tmp/.cache/uv
 RUN dnf install -y gcc gcc-c++ make && dnf clean all
 
 # Copy and install Python dependencies
-COPY requirements-lithops.txt ${LAMBDA_TASK_ROOT}/
+COPY virtualize_ismip6/requirements-lithops.txt ${LAMBDA_TASK_ROOT}/
 RUN pip install --no-cache-dir -r ${LAMBDA_TASK_ROOT}/requirements-lithops.txt
 
 # Copy the ismip6_helper module
