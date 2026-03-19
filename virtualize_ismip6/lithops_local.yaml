@@ -1,0 +1,8 @@
+lithops:
+    backend: localhost
+    storage: localhost
+    execution_timeout: 21600
+
+localhost:
+    runtime: python
+    worker_processes: 10 # set dependent on your cores.

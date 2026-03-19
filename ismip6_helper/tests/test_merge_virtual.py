@@ -857,7 +857,7 @@ class TestSkipList:
         """Skip list should load entries and ignore comments/blanks."""
         import os
         import sys
-        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'virtualize_ismip6'))
         from virtualize_with_lithops_combine_variables import load_skip_list
 
         skip_file = tmp_path / "skip.txt"
@@ -875,7 +875,7 @@ class TestSkipList:
         """filter_urls_by_skip_list should match substrings."""
         import os
         import sys
-        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'virtualize_ismip6'))
         from virtualize_with_lithops_combine_variables import filter_urls_by_skip_list
 
         skip_list = {"NCAR/CISM/expD12/acabf"}
@@ -893,7 +893,7 @@ class TestSkipList:
         """Missing file should return empty set with warning."""
         import os
         import sys
-        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'virtualize_ismip6'))
         from virtualize_with_lithops_combine_variables import load_skip_list
 
         result = load_skip_list(str(tmp_path / "nonexistent.txt"))

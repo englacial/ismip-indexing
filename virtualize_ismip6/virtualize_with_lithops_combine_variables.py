@@ -49,7 +49,12 @@ STORE_TYPE_CONFIG = {
 }
 
 
-def load_skip_list(path: str = "skip_list.txt") -> set:
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def load_skip_list(path: str = None) -> set:
+    if path is None:
+        path = os.path.join(_SCRIPT_DIR, "skip_list.txt")
     """Load the skip list from a text file.
 
     Each non-empty, non-comment line is a substring matched against URLs.
@@ -203,7 +208,7 @@ def virtualize_and_combine_batch(urls: List[str], registry: ObjectStoreRegistry,
     loadable_variables = ['x', 'y', 'lat', 'lon', 'latitude', 'longitude', 'nv4', 'lon_bnds', 'lat_bnds', 'time', 'bnds']
 
     # S3 store for downloading NetCDF3 files (obstore works without s3fs)
-    s3_store = obstore.store.from_url(SOURCE_BUCKET, skip_signature=True)
+    s3_store = obstore.store.from_url(SOURCE_BUCKET, skip_signature=True, region="us-west-2")
 
     # virtualize and append all needed metadata (for now just the variable)
     vdatasets = []
@@ -247,7 +252,7 @@ def batch_virt_func(batch: Tuple[Tuple[str], List[Dict[str, Union[str, int]]]]) 
     """Wrap batch virtualization in error handling"""
     try:
         bucket = SOURCE_BUCKET
-        store = obstore.store.from_url(bucket, skip_signature=True)
+        store = obstore.store.from_url(bucket, skip_signature=True, region="us-west-2")
         registry = ObjectStoreRegistry({bucket: store})
         bin_time = batch.get('bin_time', True)
         vds, nc3_fallbacks = virtualize_and_combine_batch(batch['urls'], registry, bin_time=bin_time)
