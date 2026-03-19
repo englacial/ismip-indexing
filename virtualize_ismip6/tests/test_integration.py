@@ -210,7 +210,7 @@ class TestLithopsLambda:
 
     NOTE: These tests require a deployed Lithops Lambda runtime.
     The runtime is built and deployed locally (not in CI) via:
-        uv run lithops runtime build -f Dockerfile.lithops -c lithops_aws.yaml ismip6-icechunk
+        uv run lithops runtime build -f Dockerfile.lithops -c virtualize_ismip6/lithops_aws.yaml ismip6-icechunk
     If the runtime is not deployed, these tests will fail.
     """
 
@@ -221,7 +221,7 @@ class TestLithopsLambda:
         def hello(x):
             return x * 2
 
-        fexec = lithops.FunctionExecutor(config_file="lithops_aws.yaml")
+        fexec = lithops.FunctionExecutor(config_file="virtualize_ismip6/lithops_aws.yaml")
         futures = fexec.map(hello, [21])
         result = fexec.get_result(futures)
         _print_lambda_cost(futures, "test_hello_function")
@@ -247,7 +247,7 @@ class TestLithopsLambda:
             ],
         }
 
-        fexec = lithops.FunctionExecutor(config_file="lithops_aws.yaml")
+        fexec = lithops.FunctionExecutor(config_file="virtualize_ismip6/lithops_aws.yaml")
         futures = fexec.map(virt.batch_virt_func, [{"batch": batch}])
         results = fexec.get_result(futures)
         _print_lambda_cost(futures, "test_virtualize_single_batch")
@@ -279,7 +279,7 @@ class TestLithopsLambda:
         }
 
         # Virtualize on Lambda
-        fexec = lithops.FunctionExecutor(config_file="lithops_aws.yaml")
+        fexec = lithops.FunctionExecutor(config_file="virtualize_ismip6/lithops_aws.yaml")
         futures = fexec.map(virt.batch_virt_func, [{"batch": batch}])
         results = fexec.get_result(futures)
         _print_lambda_cost(futures, "test_virtualize_and_write_to_icechunk")
@@ -333,7 +333,7 @@ class TestLithopsLambda:
             "bin_time": True,
         }
 
-        fexec = lithops.FunctionExecutor(config_file="lithops_aws.yaml")
+        fexec = lithops.FunctionExecutor(config_file="virtualize_ismip6/lithops_aws.yaml")
         futures = fexec.map(virt.batch_virt_func, [{"batch": batch}])
         results = fexec.get_result(futures)
         _print_lambda_cost(futures, "test_virtualize_netcdf3_on_lambda")
