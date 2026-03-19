@@ -24,7 +24,7 @@ THRESHOLDS = {
 
 
 def storage_url_to_https(url: str) -> str:
-    """Convert s3:// or gs:// URL to a public HTTPS download URL."""
+    """Convert an s3:// URL to a public HTTPS download URL."""
     if url.startswith('s3://us-west-2.opendata.source.coop/'):
         # source.coop requires downloads via data.source.coop
         # s3://us-west-2.opendata.source.coop/englacial/ismip6/... → https://data.source.coop/englacial/ismip6/...
@@ -32,8 +32,6 @@ def storage_url_to_https(url: str) -> str:
         return f'https://data.source.coop/{key}'
     if url.startswith('s3://'):
         return 'https://' + url[5:]
-    if url.startswith('gs://'):
-        return 'https://storage.googleapis.com/' + url[5:]
     return url
 
 

@@ -1,4 +1,6 @@
-# Cloud Setup for ISMIP6 Indexing
+# Cloud Setup for ISMIP6 Indexing (GCP -- Legacy)
+
+> **Note:** AWS Lambda is now the preferred deployment target. See [lithops_aws.md](lithops_aws.md) for the current setup guide. GCP Cloud Functions had per-object mutation rate limits on GCS that forced sequential writes, making the pipeline significantly slower. This document is retained for reference.
 
 This document describes the cloud infrastructure setup required for running the ISMIP6 virtualization pipeline using Lithops on Google Cloud Platform.
 

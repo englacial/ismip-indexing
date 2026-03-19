@@ -1,7 +1,10 @@
-# Running ISMIP6 Virtualization on AWS
+# Running ISMIP6 Virtualization on AWS (Preferred)
 
 This document describes how to set up and run the ISMIP6 Lithops virtualization
-pipeline on AWS Lambda with S3-backed Icechunk storage.
+pipeline on AWS Lambda with S3-backed Icechunk storage. **AWS is the recommended
+deployment target** -- it supports concurrent batch writes with automatic rebase
+retry, whereas GCP Cloud Functions hit per-object rate limits that force sequential
+writes.
 
 ## Background: Why Move to AWS?
 
@@ -335,17 +338,17 @@ def get_repo_kwargs(local_storage: bool = False) -> dict:
             from_env=True,
         )
     config = icechunk.RepositoryConfig.default()
+    SOURCE_BUCKET = "s3://us-west-2.opendata.source.coop/englacial/ismip6"
     config.set_virtual_chunk_container(
         icechunk.VirtualChunkContainer(
-            "gs://ismip6/",
-            store=icechunk.gcs_store()
+            SOURCE_BUCKET + "/",
+            store=icechunk.s3_store(region="us-west-2", anonymous=True)
         )
     )
-    # Can be more aggressive on S3 than on GCS
     config.max_concurrent_requests = 10
 
     credentials = icechunk.containers_credentials({
-        "gs://ismip6/": None
+        SOURCE_BUCKET + "/": None
     })
     return {
         'storage': storage,
@@ -354,10 +357,10 @@ def get_repo_kwargs(local_storage: bool = False) -> dict:
     }
 ```
 
-Note: the source data still lives on `gs://ismip6` (public GCS). The virtual
-chunk container still points there. Only the Icechunk metadata store moves
-to S3. Cross-cloud reads of public data work fine -- there is no egress cost
-for reading from a public GCS bucket.
+Note: Both the source data and the Icechunk store live on S3 (source.coop, us-west-2).
+The source data was migrated from `gs://ismip6` (GCS) to
+`s3://us-west-2.opendata.source.coop/englacial/ismip6/` to keep reads in-region
+with Lambda and avoid cross-cloud egress.
 
 ### Accept Config File as CLI Argument
 
