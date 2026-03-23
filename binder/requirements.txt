@@ -4,3 +4,8 @@ zarr>=3.1.5
 numcodecs>=0.16.5
 matplotlib>=3.10.7
 cftime>=1.6.5
+numpy
+holoviews
+hvplot
+pyproj
+rich
