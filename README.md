@@ -1,6 +1,6 @@
 # ISMIP 6 Virtualization Pipeline
 
-[![Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/englacial/ismip-indexing/main?labpath=notebooks)
+[![Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/englacial/ismip-indexing/main?urlpath=lab/tree/notebooks)
 
 This repository is used to build a "virtualized" cloud-ready version of the Ice-Sheet Model Intercomparison for CMIP 6 (ISMIP 6) model outputs. To learn more about ISMIP, visit https://www.ismip.org/
 
