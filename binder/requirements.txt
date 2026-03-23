@@ -1,0 +1,6 @@
+icechunk>=1.1.13
+xarray>=2025.10.1
+zarr>=3.1.5
+numcodecs>=0.16.5
+matplotlib>=3.10.7
+cftime>=1.6.5
