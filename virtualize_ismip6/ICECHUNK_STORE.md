@@ -38,6 +38,24 @@ Each experiment group contains the merged variables as Zarr arrays, plus shared 
 
 The `combined` store bins time to annual resolution so that state variables (sampled at Jan 1) and flux variables (sampled at Jul 1) share a common time axis. The `state` and `flux` stores preserve the original time values.
 
+## Store format and a second store beside the first
+
+The repository at `englacial/ismip6/icechunk-ais` is Icechunk spec v1 (it was written with
+icechunk 1.x: a `refs/branch.main/ref.json` pointer, no `repo` object). The pipeline now
+pins icechunk 2.3, which creates spec v2 repositories (a single `repo` object holds the
+branch pointers and the snapshot lineage). A v2 repository is not readable by icechunk 1.x
+or by old JavaScript readers, so the existing store is not upgraded in place: build a new
+one beside it with `--store-prefix englacial/ismip6/icechunk-ais-v2`, point readers at it
+when ready, and delete the old prefix at leisure. The Lambda runtime
+(`requirements-lithops.txt`) carries no icechunk; it must carry the same VirtualiZarr,
+zarr and xarray versions as the driver, since the workers ship virtual datasets back to
+the driver by pickle.
+
+Every group a build writes now carries the CRS pointers a viewer needs (`grid_mapping` on
+the fields and the group, the projection scalar listed in `coordinates`; see
+`ismip6_helper.grid_utils.ensure_grid_mapping`). `fix_crs_existing_store.py` added the
+same to the v1 store after the fact.
+
 ## How the Pipeline Works
 
 The pipeline is implemented in `virtualize_with_lithops_combine_variables.py` and uses Lithops to run virtualization on AWS Lambda.

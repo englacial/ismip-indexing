@@ -529,7 +529,8 @@ def _load_store_credentials(write_creds: str) -> dict:
     return creds
 
 
-def get_repo_kwargs(local_storage: bool = False, cloud_backend: str = "aws", write_creds: str = None) -> dict:
+def get_repo_kwargs(local_storage: bool = False, cloud_backend: str = "aws", write_creds: str = None,
+                    store_prefix: str = None) -> dict:
     """Build icechunk Repository kwargs for the given storage backend.
 
     All store types share a single unified icechunk repo at UNIFIED_STORE_PREFIX.
@@ -540,8 +541,11 @@ def get_repo_kwargs(local_storage: bool = False, cloud_backend: str = "aws", wri
             concurrency settings to use.
         write_creds: Path to JSON file with source.coop store write credentials.
             If None, credentials are read from the environment.
+        store_prefix: Bucket prefix of the repository (default UNIFIED_STORE_PREFIX);
+            a new prefix such as ``englacial/ismip6/icechunk-ais-v2`` builds a second
+            store beside the existing one.
     """
-    s3_prefix = UNIFIED_STORE_PREFIX
+    s3_prefix = store_prefix or UNIFIED_STORE_PREFIX
     if local_storage:
         storage = icechunk.local_filesystem_storage("test-output/test_icechunk")
     elif cloud_backend == "aws":
@@ -557,6 +561,17 @@ def get_repo_kwargs(local_storage: bool = False, cloud_backend: str = "aws", wri
                 secret_access_key=creds["aws_secret_access_key"],
                 session_token=creds["aws_session_token"],
             )
+            if creds.get("endpoint_url"):
+                # source.coop's STS-proxy keys only work against data.source.coop, where
+                # the S3 bucket is the account and the key starts with the repository
+                account, _, repo_prefix = s3_prefix.partition("/")
+                storage_kwargs.update(
+                    bucket=account,
+                    prefix=repo_prefix,
+                    endpoint_url=creds["endpoint_url"],
+                    region=creds.get("region_name", "us-east-1"),
+                    force_path_style=True,
+                )
         else:
             storage_kwargs["from_env"] = True
         storage = icechunk.s3_storage(**storage_kwargs)
@@ -638,6 +653,7 @@ def annotate_all_groups(
     cloud_backend: str = "aws",
     write_creds: str = None,
     store_type: str = "combined",
+    store_prefix: str = None,
 ):
     """Walk all groups in the store and annotate ignore_value attrs.
 
@@ -651,6 +667,7 @@ def annotate_all_groups(
         local_storage=local_storage,
         cloud_backend=cloud_backend,
         write_creds=write_creds,
+        store_prefix=store_prefix,
     )
     repo = icechunk.Repository.open_or_create(**repo_kwargs)
     session = repo.readonly_session(branch="main")
@@ -717,6 +734,7 @@ def process_all_files(
     test_experiment: str = None,
     write_creds: str = None,
     store_type: str = "combined",
+    store_prefix: str = None,
 ):
     """Process all files using Lithops serverless executor.
 
@@ -762,7 +780,8 @@ def process_all_files(
     grouped = files_df.groupby(['institution', 'model_name', 'experiment'])
 
     # skip groups already in the zarr store
-    repo_kwargs = get_repo_kwargs(local_storage=local_storage, cloud_backend=cloud_backend, write_creds=write_creds)
+    repo_kwargs = get_repo_kwargs(local_storage=local_storage, cloud_backend=cloud_backend, write_creds=write_creds,
+                                  store_prefix=store_prefix)
     print(f"Opening icechunk repo at {repo_kwargs['storage']}")
     repo = icechunk.Repository.open_or_create(**repo_kwargs)
     session = repo.readonly_session(branch="main")
@@ -1030,6 +1049,11 @@ if __name__ == "__main__":
              "If not provided, credentials are read from the environment."
     )
     parser.add_argument(
+        "--store-prefix", default=None,
+        help=f"bucket prefix of the Icechunk repository (default {UNIFIED_STORE_PREFIX}); a new prefix "
+             "such as englacial/ismip6/icechunk-ais-v2 builds a second store beside the existing one",
+    )
+    parser.add_argument(
         "--store-type", default="all",
         choices=["all", "combined", "state", "flux"],
         help="Type of icechunk store to build: 'all' (runs combined, state, and flux sequentially), "
@@ -1064,6 +1088,7 @@ if __name__ == "__main__":
                 local_storage=args.local_storage,
                 cloud_backend=cloud_backend,
                 write_creds=args.write_creds,
+            store_prefix=args.store_prefix,
                 store_type=st,
             )
         import sys
@@ -1099,6 +1124,8 @@ if __name__ == "__main__":
                 cmd.append("--sequential-writes")
             if args.write_creds:
                 cmd.extend(["--write-creds", args.write_creds])
+            if args.store_prefix:
+                cmd.extend(["--store-prefix", args.store_prefix])
             proc = subprocess.run(cmd)
             if proc.returncode != 0:
                 print(f"\nERROR: store type '{st}' exited with code {proc.returncode}")
@@ -1115,6 +1142,7 @@ if __name__ == "__main__":
             test_model=args.test_model,
             test_experiment=args.test_experiment,
             write_creds=args.write_creds,
+            store_prefix=args.store_prefix,
             store_type=st,
         )
 

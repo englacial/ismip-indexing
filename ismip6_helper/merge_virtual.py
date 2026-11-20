@@ -25,7 +25,7 @@ import cftime
 import numpy as np
 import xarray as xr
 from virtualizarr.manifests import ChunkManifest, ManifestArray
-from zarr.core.chunk_grids import RegularChunkGrid
+from zarr.core.metadata.v3 import RegularChunkGridMetadata
 
 from .rechunk_virtual import rechunk_contiguous_time_axis
 from .time_utils import STANDARD_TIME_UNITS, STANDARD_TIME_CALENDAR
@@ -251,7 +251,7 @@ def _pad_manifest_to_union(
     # Update metadata: new shape, fill_value=NaN, preserve original chunk shape
     new_shape = (n_union,) + spatial_shape
     original_chunk_shape = tuple(marr.metadata.chunk_grid.chunk_shape)
-    new_chunk_grid = RegularChunkGrid(chunk_shape=original_chunk_shape)
+    new_chunk_grid = RegularChunkGridMetadata(chunk_shape=original_chunk_shape)
     new_metadata = dataclasses.replace(
         marr.metadata,
         shape=new_shape,
@@ -360,7 +360,7 @@ def _pad_manifest_chunks_to_union(
     )
 
     new_shape = (n_union,) + spatial_shape
-    new_chunk_grid = RegularChunkGrid(chunk_shape=chunk_shape)
+    new_chunk_grid = RegularChunkGridMetadata(chunk_shape=chunk_shape)
     new_metadata = dataclasses.replace(
         marr.metadata,
         shape=new_shape,

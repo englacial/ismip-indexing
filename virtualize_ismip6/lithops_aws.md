@@ -250,6 +250,35 @@ uv run lithops hello -c lithops_aws.yaml
 
 Expected output: `Hello <username>! Lithops is working as expected :)`
 
+### 7. Credentials for CI
+
+The Tests workflow (`.github/workflows/test.yml`) rebuilds and redeploys the
+runtime on every push to `main` and every pull request. It needs to push to
+the `lithops_*` ECR repositories, create and delete the `lithops-worker-*`
+functions, pass `lithops-ismip6-executor` to Lambda, and read and write the
+`ismip6-icechunk` bucket. [`github-oidc.yaml`](github-oidc.yaml) is a role
+with exactly that, trusting GitHub's OIDC tokens for this repository; an
+account administrator creates it once:
+
+```bash
+aws cloudformation deploy --region us-west-2 --stack-name ismip6-virtualize-github \
+    --template-file virtualize_ismip6/github-oidc.yaml --capabilities CAPABILITY_NAMED_IAM
+```
+
+Its `RoleArn` output goes into the repository variable `ISMIP6_TESTS_ROLE_ARN`,
+and the job assumes the role through `aws-actions/configure-aws-credentials`.
+While the variable is unset the job falls back to the user keys in
+`.github/encrypted/aws-credentials.enc.env`, which have to carry the same
+permissions; the ISMIP7 release role (`ismip7-virtualize-github-release`) does
+not help here, since it trusts only the ismip7-indexing repository and can
+only push that function's image.
+
+A failure at `lithops runtime build` with `not authorized to perform:
+ecr:CreateRepository` means the identity lacks these rights, even when the
+repository already exists: Lithops always calls `CreateRepository` and relies
+on the "already exists" error. The workflow builds before it deletes the old
+runtime, so a refused push leaves the deployed runtime in place.
+
 ## How Lithops Lambda Runtimes Work
 
 Understanding the runtime model is important because it affects how you

@@ -12,7 +12,7 @@ import dataclasses
 import numpy as np
 import xarray as xr
 from virtualizarr.manifests import ChunkManifest, ManifestArray
-from zarr.core.chunk_grids import RegularChunkGrid
+from zarr.core.metadata.v3 import RegularChunkGridMetadata
 
 
 def rechunk_contiguous_time_axis(vds: xr.Dataset) -> xr.Dataset:
@@ -91,7 +91,7 @@ def _rechunk_variable(var: xr.Variable) -> xr.Variable:
     )
 
     # Update metadata with new chunk shape via dataclasses.replace
-    new_chunk_grid = RegularChunkGrid(chunk_shape=(1, ny, nx))
+    new_chunk_grid = RegularChunkGridMetadata(chunk_shape=(1, ny, nx))
     new_metadata = dataclasses.replace(marr.metadata, chunk_grid=new_chunk_grid)
 
     new_marr = ManifestArray(metadata=new_metadata, chunkmanifest=new_manifest)

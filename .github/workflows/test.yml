@@ -19,12 +19,25 @@ jobs:
   integration-tests:
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' || github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - run: uv python install 3.12
 
+      # The role comes from virtualize_ismip6/github-oidc.yaml; while the
+      # variable is unset the job falls back to the encrypted user keys.
+      - name: Assume the tests role (OIDC)
+        if: vars.ISMIP6_TESTS_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.ISMIP6_TESTS_ROLE_ARN }}
+          aws-region: us-west-2
+
       - name: Decrypt AWS credentials
+        if: vars.ISMIP6_TESTS_ROLE_ARN == ''
         env:
           SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}
         run: |
@@ -50,10 +63,11 @@ jobs:
           # Docker V2 image manifest, not a multi-entry index.
           BUILDX_NO_DEFAULT_ATTESTATIONS: 1
         run: |
-          # Delete existing runtime to force fresh build (ignore error if not exists)
-          uv run lithops runtime delete ismip6-icechunk -c virtualize_ismip6/lithops_aws.yaml || true
-          # Build and deploy fresh runtime with latest ismip6_helper
+          # Build and push the image first: if the push is refused (see "Credentials
+          # for CI" in virtualize_ismip6/lithops_aws.md) the deployed runtime is left alone.
           uv run lithops runtime build -f Dockerfile.lithops ismip6-icechunk -c virtualize_ismip6/lithops_aws.yaml
+          # Delete the existing runtime (ignore error if not exists) so deploy creates it from the new image
+          uv run lithops runtime delete ismip6-icechunk -c virtualize_ismip6/lithops_aws.yaml || true
           uv run lithops runtime deploy ismip6-icechunk -c virtualize_ismip6/lithops_aws.yaml
 
       - run: uv run python -m pytest virtualize_ismip6/tests/test_integration.py -v -s -W ignore::SyntaxWarning -m integration
