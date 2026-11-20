@@ -18,8 +18,12 @@ If you're interested in **using** this ISMIP 6 dataset, there are a couple of op
 ### Accesing the virtualized ISMIP 6 dataset with Xarray
 
 There's some boilerplate code to open the dataset. Don't worry - you can just copy and paste this part.
+It is tested with icechunk 2.3 (`pip install "icechunk>=2.3" xarray`); the store is in the Icechunk 1 format, so icechunk 1.1.13 or later also reads it.
 
-```
+```python
+import icechunk
+import xarray as xr
+
 SOURCE_BUCKET = "s3://us-west-2.opendata.source.coop/englacial/ismip6"
 
 storage = icechunk.s3_storage(
@@ -36,7 +40,9 @@ config.set_virtual_chunk_container(
         store=icechunk.s3_store(region="us-west-2", anonymous=True),
     )
 )
-credentials = icechunk.containers_credentials({SOURCE_BUCKET + "/": None})
+credentials = icechunk.containers_credentials(
+    {SOURCE_BUCKET + "/": icechunk.s3_anonymous_credentials()}
+)
 
 repo = icechunk.Repository.open(
     storage=storage,
@@ -48,7 +54,7 @@ session = repo.readonly_session(branch="main")
 
 Once you've got it open, you can load data like this:
 
-```
+```python
 ds = xr.open_zarr(session.store, group="combined/JPL1_ISSM/exp05", consolidated=False)
 ```
 
