@@ -250,6 +250,27 @@ uv run lithops hello -c lithops_aws.yaml
 
 Expected output: `Hello <username>! Lithops is working as expected :)`
 
+### 7. Permissions for CI
+
+The Tests workflow (`.github/workflows/test.yml`) rebuilds and redeploys the
+runtime on every push to `main` and every pull request, with the AWS keys in
+`.github/encrypted/aws-credentials.enc.env`. The identity behind those keys
+needs the policy in [`ci-deployer-policy.json`](ci-deployer-policy.json): push
+to the `lithops_*` ECR repositories, manage the `lithops-worker-*` functions,
+pass `lithops-ismip6-executor` to Lambda, and read and write the
+`ismip6-icechunk` bucket. An administrator attaches it with
+
+```bash
+aws iam put-user-policy --user-name <deployer> --policy-name ismip6-ci-deployer \
+    --policy-document file://virtualize_ismip6/ci-deployer-policy.json
+```
+
+Without it the job fails at `lithops runtime build` with `not authorized to
+perform: ecr:CreateRepository`, even when the repository already exists:
+Lithops always calls `CreateRepository` and relies on the "already exists"
+error. The workflow builds before it deletes the old runtime, so a refused
+push leaves the deployed runtime in place.
+
 ## How Lithops Lambda Runtimes Work
 
 Understanding the runtime model is important because it affects how you
