@@ -16,6 +16,12 @@ Parameters:
   Repository:
     Type: String
     Default: englacial/ismip-indexing
+  ImmutableRepository:
+    Type: String
+    Default: englacial@238580700/ismip-indexing@1084640461
+    Description: >-
+      owner@owner-id/repo@repo-id, the subject prefix GitHub issues once a
+      repository is renamed or moved (gh api repos/<owner>/<repo>/actions/oidc/customization/sub)
   ExecutionRole:
     Type: String
     Default: lithops-ismip6-executor
@@ -54,8 +60,10 @@ Resources:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
               StringLike:
-                # pushes to main and pull requests of this repository
-                token.actions.githubusercontent.com:sub: !Sub repo:${Repository}:*
+                # pushes to main and pull requests of this repository, in both subject forms
+                token.actions.githubusercontent.com:sub:
+                  - !Sub repo:${Repository}:*
+                  - !Sub repo:${ImmutableRepository}:*
       Policies:
         - PolicyName: rebuild-and-run-lithops-runtime
           PolicyDocument:
