@@ -19,6 +19,9 @@ SOURCE_DATA_URL = "s3://us-west-2.opendata.source.coop/englacial/ismip6"
 
 from .grid_utils import (
     correct_grid_coordinates,
+    ensure_grid_mapping,
+    gets_grid_mapping,
+    region_of_crs,
     detect_grid_resolution,
     create_coordinates,
     verify_latlon_consistency,
@@ -68,6 +71,9 @@ __all__ = [
     "SOURCE_DATA_URL",
     # Grid utils
     "correct_grid_coordinates",
+    "ensure_grid_mapping",
+    "gets_grid_mapping",
+    "region_of_crs",
     "detect_grid_resolution",
     "create_coordinates",
     "verify_latlon_consistency",

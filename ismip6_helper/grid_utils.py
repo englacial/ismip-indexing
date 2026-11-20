@@ -1,12 +1,21 @@
 """
 Utility functions for correcting ISMIP6 grid coordinates.
 
-The ISMIP6 standard grid is a polar stereographic projection (EPSG:3031):
-- Standard parallel: 71° S
-- Central meridian: 0° W
-- Datum: WGS84
-- Domain: (-3,040,000 m, -3,040,000 m) to (3,040,000 m, 3,040,000 m)
-- Resolutions: 32 km, 16 km, 8 km, 4 km, 2 km, or 1 km
+Both ISMIP6 standard grids are polar stereographic on WGS84, and a source file
+that lacks x/y is told apart by its array shape alone (no shape is shared):
+
+- Antarctica (AIS), EPSG:3031: standard parallel 71° S, central meridian 0°,
+  domain (-3,040 km, -3,040 km) to (3,040 km, 3,040 km), square;
+  32/16/8/4/2/1 km give 191/381/761/1521/3041/6081 points per side.
+- Greenland (GrIS), EPSG:3413: standard parallel 70° N, central meridian 45° W,
+  domain (-720 km, -3,450 km) to (960 km, -570 km), so nx != ny;
+  32/16/8/5/4/2/1 km give 53x91, 106x181, 211x361, 337x577, 421x721,
+  841x1441, 1681x2881 (nx x ny). At 32 km the x extent is not a whole number
+  of cells and the last column sits at 944 km.
+
+The tables are the ISMIP grid description files vendored in
+``ismip7_helper.conventions`` (``grid_registry()``), which list AIS 2-32 km and
+GrIS 1-16 km; AIS 1 km and GrIS 32 km follow from the same origins and extents.
 """
 
 import logging
@@ -14,7 +23,6 @@ import numpy as np
 import xarray as xr
 from typing import Tuple, Optional
 import warnings
-import pyproj
 
 logger = logging.getLogger(__name__)
 
@@ -27,13 +35,100 @@ GRID_BOUNDS = {
     'y_max': 3040000.0,   # meters
 }
 
+#: Domain of each ice sheet's standard grid, in metres of its own projection.
+GRID_BOUNDS_BY_REGION = {
+    'AIS': GRID_BOUNDS,
+    'GrIS': {'x_min': -720000.0, 'x_max': 960000.0, 'y_min': -3450000.0, 'y_max': -570000.0},
+}
+
 # Standard resolutions in meters
 STANDARD_RESOLUTIONS = [32000, 16000, 8000, 4000, 2000, 1000]
 
+#: Resolutions (m) each ice sheet's standard grid comes in, coarsest first.
+STANDARD_RESOLUTIONS_BY_REGION = {
+    'AIS': STANDARD_RESOLUTIONS,
+    'GrIS': [32000, 16000, 8000, 5000, 4000, 2000, 1000],
+}
 
-def detect_grid_resolution(nx: int, ny: int) -> Tuple[float, float]:
+
+def _grid_shape(region: str, res: int) -> Tuple[int, int]:
+    """(nx, ny) of a standard grid: one point per cell edge, truncated when the extent is not a whole number of cells."""
+    b = GRID_BOUNDS_BY_REGION[region]
+    return (int((b['x_max'] - b['x_min']) // res) + 1,
+            int((b['y_max'] - b['y_min']) // res) + 1)
+
+
+#: ``(nx, ny) -> (region, resolution in m)`` for every standard ISMIP6 grid; no shape is shared.
+GRID_SHAPES = {
+    _grid_shape(region, res): (region, res)
+    for region, resolutions in STANDARD_RESOLUTIONS_BY_REGION.items()
+    for res in resolutions
+}
+
+
+#: EPSG:3031 (WGS 84 / Antarctic Polar Stereographic) as CF grid-mapping attributes.
+#: The projection scalar every ISMIP6 group carries; viewers read ``grid_mapping``
+#: attributes that point at it.
+EPSG_3031_ATTRS = {
+    'grid_mapping_name': 'polar_stereographic',
+    'latitude_of_projection_origin': -90.0,
+    'standard_parallel': -71.0,
+    'straight_vertical_longitude_from_pole': 0.0,
+    'false_easting': 0.0,
+    'false_northing': 0.0,
+    'semi_major_axis': 6378137.0,
+    'semi_minor_axis': 6356752.314245,
+    'inverse_flattening': 298.257223563,
+    'spatial_ref': 'EPSG:3031',
+    'crs_wkt': 'PROJCS["WGS 84 / Antarctic Polar Stereographic",'
+               'GEOGCS["WGS 84",DATUM["WGS_1984",'
+               'SPHEROID["WGS 84",6378137,298.257223563]],'
+               'PRIMEM["Greenwich",0],UNIT["degree",0.0174532925199433]],'
+               'PROJECTION["Polar_Stereographic"],'
+               'PARAMETER["latitude_of_origin",-71],'
+               'PARAMETER["central_meridian",0],'
+               'PARAMETER["false_easting",0],'
+               'PARAMETER["false_northing",0],'
+               'UNIT["metre",1]]',
+}
+
+#: EPSG:3413 (WGS 84 / NSIDC Sea Ice Polar Stereographic North), the ISMIP6 Greenland grid.
+EPSG_3413_ATTRS = {
+    'grid_mapping_name': 'polar_stereographic',
+    'latitude_of_projection_origin': 90.0,
+    'standard_parallel': 70.0,
+    'straight_vertical_longitude_from_pole': -45.0,
+    'false_easting': 0.0,
+    'false_northing': 0.0,
+    'semi_major_axis': 6378137.0,
+    'semi_minor_axis': 6356752.314245,
+    'inverse_flattening': 298.257223563,
+    'spatial_ref': 'EPSG:3413',
+    'crs_wkt': 'PROJCS["WGS 84 / NSIDC Sea Ice Polar Stereographic North",'
+               'GEOGCS["WGS 84",DATUM["WGS_1984",'
+               'SPHEROID["WGS 84",6378137,298.257223563]],'
+               'PRIMEM["Greenwich",0],UNIT["degree",0.0174532925199433]],'
+               'PROJECTION["Polar_Stereographic"],'
+               'PARAMETER["latitude_of_origin",70],'
+               'PARAMETER["central_meridian",-45],'
+               'PARAMETER["false_easting",0],'
+               'PARAMETER["false_northing",0],'
+               'UNIT["metre",1]]',
+}
+
+#: The projection of each ISMIP ice sheet, by the region token of the file names.
+CRS_ATTRS_BY_REGION = {'AIS': EPSG_3031_ATTRS, 'GrIS': EPSG_3413_ATTRS}
+
+#: Names a source file's projection scalar goes by, in the order we look for them.
+CRS_NAMES = ('crs', 'polar_stereographic', 'mapping', 'spatial_ref')
+
+#: Coordinate-like variables that never get a ``grid_mapping`` attribute.
+COORD_NAMES = {'x', 'y', 'time', 'lat', 'lon', 'latitude', 'longitude', 'time_bnds', 'time_bounds'}
+
+
+def detect_grid_resolution(nx: int, ny: int) -> Tuple[float, float, str]:
     """
-    Detect the grid resolution based on the number of grid points.
+    Detect the ice sheet and grid resolution from the number of grid points.
 
     Parameters
     ----------
@@ -44,34 +139,32 @@ def detect_grid_resolution(nx: int, ny: int) -> Tuple[float, float]:
 
     Returns
     -------
-    dx, dy : float, float
-        Grid spacing in meters
+    dx, dy, region : float, float, str
+        Grid spacing in meters and the ice sheet, ``'AIS'`` or ``'GrIS'``
+
+    Raises
+    ------
+    ValueError
+        If ``(nx, ny)`` is not a standard ISMIP6 grid of either ice sheet. The
+        shape alone cannot say where such a grid sits, so nothing is guessed.
     """
-    # Calculate grid extent
-    x_extent = GRID_BOUNDS['x_max'] - GRID_BOUNDS['x_min']
-    y_extent = GRID_BOUNDS['y_max'] - GRID_BOUNDS['y_min']
-
-    # Calculate spacing
-    dx = x_extent / (nx - 1) if nx > 1 else x_extent
-    dy = y_extent / (ny - 1) if ny > 1 else y_extent
-
-    # Try to match to standard resolutions
-    for res in STANDARD_RESOLUTIONS:
-        if abs(dx - res) < res * 0.1:  # Within 10% tolerance
-            dx = res
-            break
-
-    for res in STANDARD_RESOLUTIONS:
-        if abs(dy - res) < res * 0.1:
-            dy = res
-            break
-
-    return dx, dy
+    try:
+        region, res = GRID_SHAPES[(int(nx), int(ny))]
+    except KeyError:
+        known = ', '.join(
+            f"{region} {res // 1000} km {sx}x{sy}"
+            for (sx, sy), (region, res) in sorted(GRID_SHAPES.items(), key=lambda kv: kv[1]))
+        raise ValueError(
+            f"Grid shape nx={nx}, ny={ny} is not a standard ISMIP6 grid of either ice sheet; "
+            f"cannot reconstruct x/y coordinates. Known shapes (nx x ny): {known}"
+        ) from None
+    return float(res), float(res), region
 
 
-def create_coordinates(nx: int, ny: int, dx: float, dy: float) -> Tuple[np.ndarray, np.ndarray]:
+def create_coordinates(nx: int, ny: int, dx: float, dy: float,
+                       region: str = 'AIS') -> Tuple[np.ndarray, np.ndarray]:
     """
-    Create x and y coordinate arrays for ISMIP6 grid.
+    Create x and y coordinate arrays for an ISMIP6 grid.
 
     Parameters
     ----------
@@ -79,24 +172,28 @@ def create_coordinates(nx: int, ny: int, dx: float, dy: float) -> Tuple[np.ndarr
         Number of grid points
     dx, dy : float
         Grid spacing in meters
+    region : str
+        ``'AIS'`` (EPSG:3031, the default) or ``'GrIS'`` (EPSG:3413)
 
     Returns
     -------
     x, y : np.ndarray
-        Coordinate arrays in EPSG:3031
+        Coordinate arrays in the region's projection, from its lower-left corner
     """
-    # Create coordinates centered on the ISMIP6 domain
-    x = np.linspace(GRID_BOUNDS['x_min'], GRID_BOUNDS['x_max'], nx)
-    y = np.linspace(GRID_BOUNDS['y_min'], GRID_BOUNDS['y_max'], ny)
+    bounds = GRID_BOUNDS_BY_REGION[region]
+
+    # Span the ISMIP6 domain
+    x = np.linspace(bounds['x_min'], bounds['x_max'], nx)
+    y = np.linspace(bounds['y_min'], bounds['y_max'], ny)
 
     # Adjust to match detected spacing if needed
     actual_dx = (x[-1] - x[0]) / (nx - 1) if nx > 1 else 0
     actual_dy = (y[-1] - y[0]) / (ny - 1) if ny > 1 else 0
 
     if abs(actual_dx - dx) > 1.0:  # More than 1m difference
-        x = GRID_BOUNDS['x_min'] + np.arange(nx) * dx
+        x = bounds['x_min'] + np.arange(nx) * dx
     if abs(actual_dy - dy) > 1.0:
-        y = GRID_BOUNDS['y_min'] + np.arange(ny) * dy
+        y = bounds['y_min'] + np.arange(ny) * dy
 
     return x, y
 
@@ -104,18 +201,21 @@ def create_coordinates(nx: int, ny: int, dx: float, dy: float) -> Tuple[np.ndarr
 def verify_latlon_consistency(x: np.ndarray, y: np.ndarray,
                                lat: Optional[np.ndarray] = None,
                                lon: Optional[np.ndarray] = None,
-                               tolerance: float = 1.0) -> bool:
+                               tolerance: float = 1.0,
+                               crs: str = 'EPSG:3031') -> bool:
     """
     Verify that projected coordinates are consistent with lat/lon if provided.
 
     Parameters
     ----------
     x, y : np.ndarray
-        Projected coordinates (EPSG:3031)
+        Projected coordinates in ``crs``
     lat, lon : np.ndarray, optional
         Latitude and longitude arrays
     tolerance : float
         Tolerance in degrees for lat/lon matching
+    crs : str
+        The projection of ``x`` and ``y``; EPSG:3031 (AIS) or EPSG:3413 (GrIS)
 
     Returns
     -------
@@ -128,8 +228,8 @@ def verify_latlon_consistency(x: np.ndarray, y: np.ndarray,
     try:
         from pyproj import Transformer
 
-        # Create transformer from EPSG:3031 to WGS84 (lat/lon)
-        transformer = Transformer.from_crs("EPSG:3031", "EPSG:4326", always_xy=False)
+        # Create transformer from the grid's projection to WGS84 (lat/lon)
+        transformer = Transformer.from_crs(crs, "EPSG:4326", always_xy=False)
 
         # Sample a few points for verification (avoid loading full arrays)
         sample_indices = [
@@ -174,7 +274,9 @@ def correct_grid_coordinates(ds: xr.Dataset, data_var: Optional[str] = None) -> 
     Correct grid coordinates for ISMIP6 datasets.
 
     If the dataset has x and y coordinates, returns it unmodified.
-    If missing, attempts to add EPSG:3031 coordinates based on data dimensions.
+    If missing, tells the ice sheet from the array shape and adds its standard
+    grid's coordinates (EPSG:3031 for AIS, EPSG:3413 for GrIS) and projection
+    scalar. A shape that is not a standard ISMIP6 grid raises ``ValueError``.
 
     Parameters
     ----------
@@ -258,12 +360,14 @@ def correct_grid_coordinates(ds: xr.Dataset, data_var: Optional[str] = None) -> 
     print(f"⚠️  Grid correction: Dataset missing x/y coordinates for '{data_var}'")
     print(f"   Detected dimensions: {y_dim}={ny}, {x_dim}={nx}")
 
-    # Detect resolution
-    dx, dy = detect_grid_resolution(nx, ny)
-    print(f"   Estimated resolution: dx={dx/1000:.1f} km, dy={dy/1000:.1f} km")
+    # Detect ice sheet and resolution
+    dx, dy, region = detect_grid_resolution(nx, ny)
+    crs_attrs = CRS_ATTRS_BY_REGION[region]
+    epsg = crs_attrs['spatial_ref']
+    print(f"   Detected grid: {region} ({epsg}), dx={dx/1000:.1f} km, dy={dy/1000:.1f} km")
 
     # Create coordinates
-    x, y = create_coordinates(nx, ny, dx, dy)
+    x, y = create_coordinates(nx, ny, dx, dy, region)
     print(f"   Creating coordinates: x=[{x[0]/1000:.1f}, {x[-1]/1000:.1f}] km, "
           f"y=[{y[0]/1000:.1f}, {y[-1]/1000:.1f}] km")
 
@@ -288,7 +392,7 @@ def correct_grid_coordinates(ds: xr.Dataset, data_var: Optional[str] = None) -> 
         lon_array = lon_data.values
 
         print("   Verifying consistency with existing lat/lon coordinates...")
-        consistent = verify_latlon_consistency(x, y, lat_array, lon_array)
+        consistent = verify_latlon_consistency(x, y, lat_array, lon_array, crs=epsg)
 
         if consistent:
             print("   ✓ Coordinates are consistent with lat/lon")
@@ -325,45 +429,75 @@ def correct_grid_coordinates(ds: xr.Dataset, data_var: Optional[str] = None) -> 
 
     # Assign coordinate values
     ds_corrected = ds_corrected.assign_coords({
-        'x': ('x', x, {'units': 'm', 'long_name': 'x coordinate (EPSG:3031)',
+        'x': ('x', x, {'units': 'm', 'long_name': f'x coordinate ({epsg})',
                'standard_name': 'projection_x_coordinate'}),
-        'y': ('y', y, {'units': 'm', 'long_name': 'y coordinate (EPSG:3031)',
+        'y': ('y', y, {'units': 'm', 'long_name': f'y coordinate ({epsg})',
                'standard_name': 'projection_y_coordinate'})
     })
 
     # Add grid mapping information
     ds_corrected.attrs['grid_mapping'] = 'polar_stereographic'
 
-    # Add projection information as a coordinate
-    crs = xr.DataArray(
-        data=np.int32(0),
-        attrs={
-            'grid_mapping_name': 'polar_stereographic',
-            'latitude_of_projection_origin': -90.0,
-            'standard_parallel': -71.0,
-            'straight_vertical_longitude_from_pole': 0.0,
-            'false_easting': 0.0,
-            'false_northing': 0.0,
-            'semi_major_axis': 6378137.0,
-            'semi_minor_axis': 6356752.314245,
-            'inverse_flattening': 298.257223563,
-            'spatial_ref': 'EPSG:3031',
-            'crs_wkt': 'PROJCS["WGS 84 / Antarctic Polar Stereographic",'
-                       'GEOGCS["WGS 84",DATUM["WGS_1984",'
-                       'SPHEROID["WGS 84",6378137,298.257223563]],'
-                       'PRIMEM["Greenwich",0],UNIT["degree",0.0174532925199433]],'
-                       'PROJECTION["Polar_Stereographic"],'
-                       'PARAMETER["latitude_of_origin",-71],'
-                       'PARAMETER["central_meridian",0],'
-                       'PARAMETER["false_easting",0],'
-                       'PARAMETER["false_northing",0],'
-                       'UNIT["metre",1]]'
-        }
-    )
+    # Add the region's projection as a coordinate
+    crs = xr.DataArray(data=np.int32(0), attrs=dict(crs_attrs))
     ds_corrected.coords['polar_stereographic'] = crs
 
-    print(f"   ✓ Grid correction complete\n")
+    print("   ✓ Grid correction complete\n")
 
     return ds_corrected
 
 
+def region_of_crs(attrs: dict) -> Optional[str]:
+    """``'AIS'`` or ``'GrIS'`` from a projection scalar's own parameters, else ``None``."""
+    lat0 = attrs.get('latitude_of_projection_origin')
+    if lat0 is None:
+        code = str(attrs.get('spatial_ref', attrs.get('epsg_code', '')))
+        return {'EPSG:3031': 'AIS', 'EPSG:3413': 'GrIS'}.get(code.upper())
+    return 'AIS' if float(np.ravel(lat0)[0]) < 0 else 'GrIS'
+
+
+def gets_grid_mapping(name: str, dims) -> bool:
+    """Whether a variable is a field on the (y, x) grid that should point at the projection."""
+    dims = tuple(dims or ())
+    if name in COORD_NAMES or name in CRS_NAMES or name.endswith(('_bnds', '_bounds')):
+        return False
+    return 'x' in dims and 'y' in dims
+
+
+def ensure_grid_mapping(ds: xr.Dataset, region: str = 'AIS') -> xr.Dataset:
+    """Give every data variable a ``grid_mapping`` pointing at the group's projection scalar.
+
+    ``region`` ('AIS' or 'GrIS') picks the projection written when the source has
+    no scalar; an existing scalar's own parameters win over it for the WKT added.
+
+    A viewer finds the CRS through the variable's ``grid_mapping`` attribute, then
+    the group's, then an array named ``crs``. The source files carry a projection
+    scalar under several names (or none), and merging variables into one dataset
+    drops dataset attributes, so this runs last, after the merge:
+
+    - the first scalar named as in :data:`CRS_NAMES` is the group's projection
+      scalar (moved to the coordinates, given ``crs_wkt`` if it lacks one);
+    - without one, a ``crs`` coordinate with the region's attributes is created;
+    - every data variable on the (y, x) grid and the dataset get ``grid_mapping = <name>``;
+      bounds, 1-D coordinates and other projection scalars do not, and any other
+      scalar named as in :data:`CRS_NAMES` is moved to the coordinates so it is not
+      mistaken for data.
+    The input dataset is not modified.
+    """
+    if region not in CRS_ATTRS_BY_REGION:
+        raise ValueError(f"region must be one of {sorted(CRS_ATTRS_BY_REGION)}, got {region!r}")
+    ds = ds.copy()
+    present = [n for n in CRS_NAMES if n in ds.variables]
+    if present:
+        name = present[0]
+        ds = ds.set_coords([n for n in present if n in ds.data_vars])
+        own = region_of_crs(ds[name].attrs) or region
+        ds[name].attrs.setdefault('crs_wkt', CRS_ATTRS_BY_REGION[own]['crs_wkt'])
+    else:
+        name = 'crs'
+        ds = ds.assign_coords({name: xr.DataArray(np.int32(0), attrs=dict(CRS_ATTRS_BY_REGION[region]))})
+    for v in ds.data_vars:
+        if gets_grid_mapping(v, ds[v].dims):
+            ds[v].attrs['grid_mapping'] = name
+    ds.attrs['grid_mapping'] = name
+    return ds

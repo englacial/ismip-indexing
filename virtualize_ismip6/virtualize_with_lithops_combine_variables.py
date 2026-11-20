@@ -1,6 +1,6 @@
 import argparse
-from concurrent.futures import ThreadPoolExecutor, as_completed, Future
-import dataclasses
+import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import gc
 import logging
 import os
@@ -86,6 +86,19 @@ def filter_urls_by_skip_list(urls: List[str], skip_list: set) -> tuple:
 
 def _parse_variable_from_url(url: str) -> str:
     return url.split('/')[-1].split('_')[0]
+
+
+def _parse_region_from_url(url: str) -> str:
+    """'AIS' or 'GrIS' from an ISMIP6 file URL: the ``Projection-AIS`` / ``Projection-GIS``
+    directory first, else the region token of the file name (``acabf_AIS_AWI_PISM1_exp13.nc``)."""
+    m = re.search(r'Projection-(AIS|GIS)/', url)
+    token = m.group(1) if m else (url.split('/')[-1].split('_') + [''])[1]
+    token = token.upper()
+    if token == 'AIS':
+        return 'AIS'
+    if token in ('GIS', 'GRIS'):
+        return 'GrIS'
+    raise ValueError(f"cannot tell the ice sheet of {url!r}: no Projection-AIS/GIS directory or AIS/GIS token")
 
 
 def infer_cloud_backend(config_file: str) -> str:
@@ -244,6 +257,8 @@ def virtualize_and_combine_batch(urls: List[str], registry: ObjectStoreRegistry,
 
     # Rechunk, pad to union time axis, and merge
     vds = ismip6_helper.merge_virtual_datasets(vdatasets)
+    # last, since merging drops dataset attributes: the CRS pointers every viewer looks for
+    vds = ismip6_helper.ensure_grid_mapping(vds, region=_parse_region_from_url(urls[0]))
 
     return vds, nc3_fallbacks
 

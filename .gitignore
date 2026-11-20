@@ -32,3 +32,6 @@ gha-creds-*.json
 # local testing
 test-output/*
 .ipynb_checkpoints/
+
+# source.coop write keys, never committed
+sc_creds.json
