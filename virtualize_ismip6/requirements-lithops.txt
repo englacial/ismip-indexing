@@ -11,10 +11,11 @@ requests==2.32.5
 # icechunk==1.1.14 # latest
 # icechunk==1.1.10 #
 # leave out icechunk, for now we are just virtualizing in lithops
-virtualizarr==2.2.1
-xarray==2025.10.1
-zarr==3.1.5
-obstore==0.8.2
+virtualizarr==2.8.0
+xarray==2026.9.0
+zarr==3.4.2
+obstore==0.12.1
+h5py==3.15.1
 kerchunk==0.2.9
 scipy==1.16.2
 
